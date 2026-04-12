@@ -1,22 +1,22 @@
-# pi-bot: Jami ↔ pi Chat Bridge
+# jami-pi: Jami ↔ pi Chat Bridge
 
 A bot that bridges Jami conversations to the pi AI coding agent.
 
 ## How It Works
 
 ```
-Jami user ↔ jami-sdk (STDIO) ↔ bot.py ↔ pi
+Jami user ↔ jami-bridge (STDIO) ↔ bot.py ↔ pi
 ```
 
-The bot launches `jami-sdk --stdio` as a subprocess and communicates via
+The bot launches `jami-bridge --stdio` as a subprocess and communicates via
 JSON-RPC over stdin/stdout. Events (messages, registration changes) are
-pushed from the SDK to the bot in real-time — no polling needed.
+pushed from bridge to bot in real-time — no polling needed.
 
 ## Requirements
 
-- **jami-sdk** binary (in PATH, set `JAMI_SDK_PATH` env, or specify with `--jami`)
+- **jami-bridge** binary (in PATH, set `JAMI_BRIDGE_PATH` env, or specify with `--jami`)
 - **pi** CLI installed and configured
-- **python3** (stdlib only — no extra packages)
+- **python3** ≥3.9 (stdlib only — no extra packages). **Linux/macOS required** (uses `fcntl`).
 
 ## Usage
 
@@ -28,6 +28,9 @@ python3 bot.py
 python3 bot.py \
   --account <account-id> \
   --conversation <conversation-id>
+
+# List available accounts
+python3 bot.py --list-accounts
 
 # Dry-run (don't call pi, just log messages)
 python3 bot.py --dry-run
@@ -41,6 +44,14 @@ python3 bot.py --no-ack
 # Custom history context (default: 20 messages)
 python3 bot.py --history 50
 
+# Group chat: only respond when mentioned or replied to
+python3 bot.py --trigger mention
+
+# Custom greeting (default: "🟢 I'm online!")
+python3 bot.py --greeting "Hello world"
+# Disable greeting
+python3 bot.py --greeting false
+
 # Pass extra args to pi
 python3 bot.py --pi-args "--model gpt-4o"
 ```
@@ -49,19 +60,19 @@ python3 bot.py --pi-args "--model gpt-4o"
 
 ### Real-Time Events via STDIO
 
-The bot launches `jami-sdk --stdio` and communicates via JSON-RPC:
+The bot launches `jami-bridge --stdio` and communicates via JSON-RPC:
 
-- **Requests**: bot → SDK (stdin)
+- **Requests**: bot → bridge (stdin)
   ```json
   {"jsonrpc":"2.0","method":"sendMessage","params":{"accountId":"...","conversationId":"...","body":"hello"},"id":1}
   ```
 
-- **Responses**: SDK → bot (stdout)
+- **Responses**: bridge → bot (stdout)
   ```json
   {"jsonrpc":"2.0","id":1,"result":{"sent":true,"conversationId":"..."}}
   ```
 
-- **Events**: SDK → bot (stdout, pushed)
+- **Events**: bridge → bot (stdout, pushed)
   ```json
   {"jsonrpc":"2.0","method":"onMessageReceived","params":{"accountId":"...","conversationId":"...","from":"...","body":"hi!"}}
   ```
@@ -79,11 +90,53 @@ before. Subsequent messages continue the existing session.
 Use `--no-session` to disable sessions (each call is a blank slate — the bot
 injects history into every prompt instead).
 
-### Acknowledgment Messages
+### Acknowledgment & Progress Messages
 
-When `--no-ack` is not set, the bot immediately sends "💭 received, thinking..."
-to the conversation so the user knows their message was received. These ack
-messages are **filtered from pi's context** so they don't pollute the LLM chat.
+When `--no-ack` is not set, the bot sends an editable status message on
+receipt. The message uses the `[bot:XXXX]` prefix (first 4 chars of the bot's
+Jami URI) and is progressively updated with:
+
+- **status**: `in progress` → `done` (or `cancelled`)
+- **model**: which LLM is generating
+- **tokens**: generation progress count
+- **tools**: which tools pi is using, with ✓/⟳ status icons
+
+Example ack message:
+```
+[bot:ab12]
+status: in progress
+model: claude-sonnet-4-20250514
+tokens: 127
+tool: read config.py ✓
+tool: edit bot.py ⟳
+```
+
+These ack messages are **filtered from pi's context** (using the `[bot:` prefix)
+so they don't pollute the LLM conversation.
+
+### Trigger Modes
+
+Control when the bot responds:
+
+- **`all`** (default): respond to every non-self, non-ack message
+- **`mention`**: respond only when the bot's name is mentioned or the message
+  is a reply to one of the bot's messages
+- **`smart`**: like mention, but may add an LLM relevance check (future)
+
+Bot names are derived from the account alias and a short URI fragment.
+
+### Stop Commands
+
+While pi is processing a request, the same sender can cancel it by sending
+a single-word message: `stop`, `abort`, `cancel`, or `kill`. On cancellation,
+any partial response is sent with a `[cancelled]` suffix, and the ack message
+shows `status: cancelled`.
+
+### Busy-Reject
+
+If pi is already processing a request, incoming messages from other senders
+receive a busy reply: *"I'm still working on a request. Please resend your
+message later."*
 
 ### Silence Mode
 
@@ -103,14 +156,16 @@ the prompt so pi can adjust its behavior.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--jami PATH` | `$JAMI_SDK_PATH` or `jami-sdk` | Path to jami-sdk binary |
-| `--account ID` | auto-detect | Jami account ID |
+| `--jami PATH` | `$JAMI_BRIDGE_PATH` or `jami-bridge` | Path to jami-bridge binary |
+| `--account ID` | auto-detect | Account ID or URI |
+| `--list-accounts` | off | List accounts and exit |
 | `--conversation ID` | auto-detect | Conversation to monitor |
 | `--history N` | `20` | Recent messages to include as context |
 | `--session-dir DIR` | `/tmp/jami-bot-sessions` | Directory for pi session files |
-| `--system-prompt TEXT` | (built-in) | System prompt for pi |
 | `--no-session` | off | Disable pi sessions (stateless) |
-| `--no-ack` | off | Don't send acknowledgment messages |
+| `--no-ack` | off | Disable acknowledgment messages |
+| `--greeting TEXT` | `online` | Startup greeting: `online` sends "🟢 I'm online!", custom text, or `false` to disable |
+| `--trigger MODE` | `all` | When to respond: `all`, `mention`, or `smart` |
 | `--pi-args ARGS` | (none) | Extra arguments passed to pi CLI |
 | `--dry-run` | off | Log messages without calling pi |
 
@@ -129,14 +184,16 @@ The bot uses these JSON-RPC methods (same as HTTP API):
 | `listConversations` | `{accountId}` | `{conversations: [info]}` |
 | `getConversation` | `{accountId, conversationId}` | `{info, members}` |
 | `sendMessage` | `{accountId, conversationId, body}` | `{sent, conversationId}` |
+| `editMessage` | `{accountId, conversationId, messageId, body}` | `{edited}` |
 | `loadMessages` | `{accountId, conversationId, count?, from?}` | `{messages: [msg]}` |
 
 ### Event Notifications
 
-Pushed by the SDK when events occur:
+Pushed by bridge when events occur:
 
 | Method | Params | Description |
 |--------|--------|-------------|
+| `onReady` | - | Bridge is ready to accept commands |
 | `onMessageReceived` | `{accountId, conversationId, from, body, id, type, timestamp}` | New message in conversation |
 | `onRegistrationChanged` | `{accountId, state, code, detail}` | Account registration status changed |
 | `onConversationRequestReceived` | `{accountId, conversationId}` | New conversation invite received |
@@ -145,7 +202,7 @@ Pushed by the SDK when events occur:
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────────────┐     ┌─────┐
-│  Jami user   │◄───►│  jami-sdk     │     │                     │     │     │
+│  Jami user   │◄───►│  jami-bridge │     │                     │     │     │
 │  (phone/PC)  │     │  (STDIO)     │     │    bot.py           │     │ pi  │
 └─────────────┘     └──────┬───────┘     │  (JSON-RPC events)  │     └─────┘
                            │              │                     │
@@ -155,17 +212,17 @@ Pushed by the SDK when events occur:
                     └──────────────┘     └─────────────────────┘
 ```
 
-- **STDIO mode**: jami-sdk runs as a subprocess of bot.py
+- **STDIO mode**: jami-bridge runs as a subprocess of bot.py
 - **JSON-RPC**: Newline-delimited JSON on stdin/stdout
-- **Event push**: SDK sends notifications to bot in real-time
+- **Event push**: Bridge sends notifications to bot in real-time
 - **No polling**: Bot waits for events instead of polling every 2s
 
 ## Benefits over HTTP Mode
 
 1. **No port conflicts** — no HTTP server means no port binding issues
-2. **Simpler deployment** — one process (bot) launches the SDK as a subprocess
+2. **Simpler deployment** — one process (bot) launches bridge as a subprocess
 3. **Real-time events** — no polling delay; events pushed instantly
-4. **Cleaner shutdown** — bot stops the SDK subprocess when exiting
+4. **Cleaner shutdown** — bot stops bridge subprocess when exiting
 5. **No CORS** — no HTTP means no cross-origin issues
 
 ## Example Session
@@ -173,6 +230,8 @@ Pushed by the SDK when events occur:
 ```
 [bot] Account: <account-id>
 [bot] Our URI: <your-jami-uri>
+[bot] Our alias: MyBot
+[bot] Trigger: all (names: ['mybot', 'a1b2c3d4'])
 [bot] Conversation: <conversation-id> (2 members)
 [bot] Session: /tmp/jami-bot-sessions/<conversation-id>.json
 [bot] History: 20 messages as context
@@ -182,6 +241,6 @@ Pushed by the SDK when events occur:
 [bot] 📨 From <sender>: hello!
 [bot] 📬 Ack sent
 [bot] 🤖 Calling pi (new session)...
-[bot] 🤖 Reply: Hi there! How can I assist you today? 😊
+[bot] 🤖 Reply: Hi there! How can I assist you today?
 [bot] ✅ Reply sent
 ```

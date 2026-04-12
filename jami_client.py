@@ -1,11 +1,12 @@
-"""Jami SDK stdio client — JSON-RPC 2.0 over stdin/stdout."""
+"""Jami bridge stdio client — JSON-RPC 2.0 over stdin/stdout."""
 
+import fcntl
 import json
 import os
 import queue
+import subprocess
 import threading
 import time
-import fcntl
 
 
 def jsonrpc_request(method, params=None, id=None):
@@ -29,13 +30,13 @@ def is_notification(obj):
 
 
 class JamiStdioClient:
-    """JSON-RPC 2.0 client that talks to the jami-sdk binary over stdio.
+    """JSON-RPC 2.0 client that talks to the jami-bridge binary over stdio.
 
     Spawns the SDK as a subprocess, sends requests on stdin,
     and reads responses/notifications from stdout.
     """
 
-    def __init__(self, jami_binary="jami-sdk"):
+    def __init__(self, jami_binary="jami-bridge"):
         self.jami_binary = jami_binary
         self.proc = None
         self.reader_thread = None
@@ -47,7 +48,7 @@ class JamiStdioClient:
         self._buf = ""
 
     def start(self):
-        """Launch the jami-sdk subprocess and start the reader thread."""
+        """Launch the jami-bridge subprocess and start the reader thread."""
         self.proc = subprocess_start(self.jami_binary)
         self.reader_thread = threading.Thread(target=self._reader, daemon=True)
         self.reader_thread.start()
@@ -59,8 +60,8 @@ class JamiStdioClient:
             if evt and evt.get("method") == "onReady":
                 return
             if not self.is_alive():
-                raise RuntimeError("jami-sdk process exited before ready")
-        raise TimeoutError("Timed out waiting for jami-sdk onReady")
+                raise RuntimeError("jami-bridge process exited before ready")
+        raise TimeoutError("Timed out waiting for jami-bridge onReady")
 
     def stop(self):
         """Shut down the SDK subprocess gracefully."""
@@ -173,9 +174,7 @@ class JamiStdioClient:
 
 
 def subprocess_start(jami_binary):
-    """Start the jami-sdk as a subprocess with stdin/stdout pipes."""
-    import subprocess
-
+    """Start the jami-bridge as a subprocess with stdin/stdout pipes."""
     return subprocess.Popen(
         [jami_binary, "--stdio"],
         stdin=subprocess.PIPE,

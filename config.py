@@ -1,4 +1,4 @@
-"""Configuration, constants, and path helpers for jami-bot-pi."""
+"""Configuration, constants, and path helpers for jami-pi."""
 
 import os
 
@@ -75,23 +75,14 @@ def should_respond(body, trigger, bot_names, parent_id="", our_message_ids=None)
     return False
 
 
-def load_system_prompt(path=None):
-    """Load the system prompt from a markdown file.
-
-    Searches in order: explicit path, ./system-prompt.md, then errors.
-    """
-    if path:
-        with open(path) as f:
-            return f.read().strip()
-
+def load_system_prompt():
+    """Load the system prompt from the bundled system-prompt.md file."""
     local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-prompt.md")
     if os.path.exists(local):
         with open(local) as f:
             return f.read().strip()
 
-    raise FileNotFoundError(
-        "system-prompt.md not found. Use --system-prompt to specify a path."
-    )
+    raise FileNotFoundError("system-prompt.md not found")
 
 
 def session_path(conv_id, session_dir):

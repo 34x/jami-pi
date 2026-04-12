@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""jami-bot-pi: Jami <-> pi chat bridge.
+"""jami-pi: Jami <-> pi chat bridge.
 
 Connects a Jami conversation to a pi coding agent, forwarding messages
 and streaming back progress updates using editable ack messages.
-
-Usage:
-    python3 bot.py --jami /path/to/jami-sdk --account <id-or-uri> [options]
 
 See: python3 bot.py --help
 """
@@ -36,11 +33,11 @@ from pi_client import call_pi
 
 
 def main():
-    parser = argparse.ArgumentParser(description="jami-bot-pi: Jami <-> pi chat bridge")
+    parser = argparse.ArgumentParser(description="jami-pi: Jami <-> pi chat bridge")
     parser.add_argument(
         "--jami",
         default=None,
-        help="Path to jami-sdk binary (or set JAMI_SDK_PATH env)",
+        help="Path to jami-bridge binary (or set JAMI_BRIDGE_PATH env)",
     )
     parser.add_argument(
         "--account", default=None, help="Account ID or URI (auto-detect)"
@@ -60,16 +57,12 @@ def main():
         default=DEFAULT_SESSION_DIR,
         help=f"pi session directory (default: {DEFAULT_SESSION_DIR})",
     )
+
     parser.add_argument(
-        "--system-prompt",
-        default=None,
-        help="System prompt for pi (default: system-prompt.md)",
+        "--no-session", action="store_true", help="Disable pi sessions (stateless)"
     )
     parser.add_argument(
-        "--no-session", action="store_true", help="Don't use pi sessions (stateless)"
-    )
-    parser.add_argument(
-        "--no-ack", action="store_true", help="Don't send acknowledgment messages"
+        "--no-ack", action="store_true", help="Disable acknowledgment messages"
     )
     parser.add_argument(
         "--greeting",
@@ -83,19 +76,13 @@ def main():
         choices=sorted(TRIGGER_MODES),
         help="When to respond: all (every msg), mention (bot name/reply), smart (mention+LLM check)",
     )
-    parser.add_argument(
-        "--name",
-        default=None,
-        help="Extra trigger name (can be used multiple times)",
-        action="append",
-    )
     parser.add_argument("--dry-run", action="store_true", help="Don't call pi")
     args = parser.parse_args()
 
-    # Resolve jami-sdk binary path: --jami flag > JAMI_SDK_PATH env > PATH lookup
-    jami_binary = args.jami or os.environ.get("JAMI_SDK_PATH") or "jami-sdk"
+    # Resolve jami-bridge binary path: --jami flag > JAMI_BRIDGE_PATH env > PATH lookup
+    jami_binary = args.jami or os.environ.get("JAMI_BRIDGE_PATH") or "jami-bridge"
 
-    system_prompt = load_system_prompt(args.system_prompt)
+    system_prompt = load_system_prompt()
     pi_extra = args.pi_args.split() if args.pi_args else None
     use_sessions = not args.no_session
     os.makedirs(args.session_dir, exist_ok=True)
@@ -103,7 +90,7 @@ def main():
     # Track sender names for readable conversation formatting
     known_senders = {}
 
-    # ── Launch jami-sdk in stdio mode ────────────────────────────────────
+    # ── Launch jami-bridge in stdio mode ────────────────────────────────────
     sdk = JamiStdioClient(jami_binary=jami_binary)
     sdk.start()
 
@@ -156,7 +143,7 @@ def main():
     # Register our own name in the known senders
     known_senders[our_uri] = our_alias or "bot"
 
-    # ── Build trigger names from alias + extra --name args ────────────
+    # ── Build trigger names from alias + URI fragment ────────────────
     bot_names = []
     if our_alias:
         bot_names.append(our_alias.lower())
@@ -164,10 +151,6 @@ def main():
     uri_short = our_uri.rsplit(":", 1)[-1][-8:] if ":" in our_uri else our_uri[-8:]
     if uri_short and uri_short not in bot_names:
         bot_names.append(uri_short.lower())
-    if args.name:
-        for n in args.name:
-            if n.lower() not in bot_names:
-                bot_names.append(n.lower())
     # Track message IDs we send, for reply-to-bot detection
     our_message_ids = set()
 
