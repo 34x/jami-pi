@@ -226,8 +226,11 @@ def main():
                 state = evt.get("params", {}).get("state", -1)
                 reg_name = evt.get("params", {}).get("name", "")
                 state_names = {
-                    0: "success", 1: "invalid name",
-                    2: "already taken", 3: "error", 4: "unsupported",
+                    0: "success",
+                    1: "invalid name",
+                    2: "already taken",
+                    3: "error",
+                    4: "unsupported",
                 }
                 state_desc = state_names.get(state, f"unknown({state})")
                 if state == 0:
