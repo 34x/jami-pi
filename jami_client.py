@@ -36,8 +36,12 @@ class JamiStdioClient:
     and reads responses/notifications from stdout.
     """
 
-    def __init__(self, jami_binary="jami-bridge"):
+    def __init__(
+        self, jami_binary="jami-bridge", bridge_args=None, verbose_bridge=False
+    ):
         self.jami_binary = jami_binary
+        self.bridge_args = bridge_args or []
+        self.verbose_bridge = verbose_bridge
         self.proc = None
         self.reader_thread = None
         self.pending = {}
@@ -49,7 +53,15 @@ class JamiStdioClient:
 
     def start(self):
         """Launch the jami-bridge subprocess and start the reader thread."""
-        self.proc = subprocess_start(self.jami_binary)
+        self.proc = subprocess_start(
+            self.jami_binary, self.bridge_args, self.verbose_bridge
+        )
+        # Start stderr reader thread only if verbose
+        if self.verbose_bridge:
+            self._stderr_thread = threading.Thread(
+                target=self._stderr_reader, daemon=True
+            )
+            self._stderr_thread.start()
         self.reader_thread = threading.Thread(target=self._reader, daemon=True)
         self.reader_thread.start()
 
@@ -130,6 +142,18 @@ class JamiStdioClient:
         except queue.Empty:
             return None
 
+    def _stderr_reader(self):
+        """Reader thread for bridge stderr: forwards logs to Python stderr."""
+        import sys
+
+        try:
+            for line in self.proc.stderr:
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    print(f"[bridge] {text}", file=sys.stderr)
+        except Exception:
+            pass
+
     def _reader(self):
         """Reader thread: read JSON-RPC from SDK stdout and dispatch."""
         fd = self.proc.stdout.fileno()
@@ -173,11 +197,20 @@ class JamiStdioClient:
             self.notifications.put(obj)
 
 
-def subprocess_start(jami_binary):
-    """Start the jami-bridge as a subprocess with stdin/stdout pipes."""
+def subprocess_start(jami_binary, bridge_args=None, verbose_bridge=False):
+    """Start the jami-bridge as a subprocess with stdin/stdout pipes.
+
+    bridge_args: optional list of extra CLI args to pass to the bridge
+                     (e.g. ["--auto-accept-from", "jami://abc123"])
+    verbose_bridge: if True, pipe stderr so bridge logs are visible;
+                    if False, discard stderr (quiet default)
+    """
+    cmd = [jami_binary, "--stdio"]
+    if bridge_args:
+        cmd.extend(bridge_args)
     return subprocess.Popen(
-        [jami_binary, "--stdio"],
+        cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE if verbose_bridge else subprocess.DEVNULL,
     )

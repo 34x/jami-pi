@@ -40,12 +40,13 @@ prints its identity:
 
 ```
 [bot] Account: <account-id>
-[bot] Our URI: jami://<your-bot-uri>
+[bot] Our URI: <your-bot-uri>
 [bot] Our alias: bot
 [bot] Waiting for messages...
 ```
 
 Copy the **Our URI** value — this is how you add the bot to a group.
+Note: use just the key part (e.g. `abc123def456`), not the `jami://` prefix, when passing to `--auto-accept-from`.
 
 Alternatively, you can add the bridge binary to your PATH or set the
 `JAMI_BRIDGE_PATH` environment variable:
@@ -60,43 +61,38 @@ python3 bot.py
 1. Open the **Jami** app on your phone or desktop
 2. Open the group conversation you want the bot in (or create a new one)
 3. Open the conversation settings → **Add member**
-4. Enter the bot's URI (the value from `Our URI` above, e.g. `jami://...`)
-5. The bot needs to accept the invite. The bridge supports `--auto-accept`
-   and `--auto-accept-from` flags for this. Since `bot.py` launches the bridge
-   with `--stdio`, you need to pass bridge flags by setting the binary path
-   to a wrapper script, or start the bridge separately with `--auto-accept`
-   first, then restart with the bot.
+4. Enter the bot's URI (the value from `Our URI` above)
+5. The bot needs to accept the invite. Use `--bridge-args` to pass
+   auto-accept flags to the bridge. The bot will automatically start
+   monitoring the conversation once the invite is accepted.
 
-**Option A — Quick setup (bot auto-accepts everything):**
-
-Create a small wrapper script and point `--jami` at it:
+**Option A — Quick setup (accept all invites, e.g. for testing):**
 
 ```bash
-cat > /tmp/jami-bridge-auto <<'EOF'
-#!/bin/bash
-exec /path/to/jami-bridge-dist/jami-bridge --auto-accept "$@"
-EOF
-chmod +x /tmp/jami-bridge-auto
-
-python3 bot.py --jami /tmp/jami-bridge-auto
+python3 bot.py --bridge-args '--auto-accept'
 ```
 
-**Option B — Accept invites with the standalone bridge, then run the bot:**
+**Option B — Accept only from your URI (production):**
+
+```bash
+python3 bot.py --bridge-args '--auto-accept-from your-uri-here'
+```
+
+**Option C — Start the bridge separately (HTTP mode):**
 
 ```bash
 # Start the bridge in HTTP mode with auto-accept
 /path/to/jami-bridge-dist/jami-bridge --auto-accept --port 8090
 
-# (From another terminal) Add the bot to your group in the Jami app now.
+# (From another terminal) Add the bot to your group in the Jami app.
 # The bridge will accept the invite automatically.
-# You should see: [jami-bridge] Accepted conversation request from ...
-
-# Once accepted, stop the bridge (Ctrl+\ or SIGTERM) and start the bot:
+# Once accepted, stop the bridge and start the bot:
 python3 bot.py --jami /path/to/jami-bridge-dist/jami-bridge
 ```
 
 > **Tip:** For production use, use `--auto-accept-from <your-uri>` to only accept
 > invites from you, or `--reject-unknown` to block all new invites.
+> These are passed via `--bridge-args`, e.g. `--bridge-args '--auto-accept-from abc123def456'`.
 
 ### 5. Chat with the bot
 
