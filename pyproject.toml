@@ -8,5 +8,4 @@ requires-python = ">=3.9"
 src = ["."]
 
 [tool.ruff.lint]
-# F821: ruff can't resolve local module imports when run from parent dir
-ignore = ["F821"]
+ignore = ["F821"]  # ruff can't resolve local module imports from parent dir

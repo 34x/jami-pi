@@ -16,9 +16,9 @@ import sys
 import threading
 
 
-from jami_client import JamiStdioClient
-from pi_client import call_pi
-from config import (
+from jami_client import JamiStdioClient  # noqa: F821
+from pi_client import call_pi  # noqa: F821
+from config import (  # noqa: F821
     ACK_PREFIX,
     SILENT_MARKER,
     CANCELLED_MARKER,
@@ -30,9 +30,10 @@ from config import (
     session_path,
     is_new_session,
     is_stop_command,
+    should_respond,
 )
-from formatting import build_prompt, format_sender
-from ack import AckManager
+from formatting import build_prompt, format_sender  # noqa: F821
+from ack import AckManager  # noqa: F821
 
 
 def main():
@@ -273,17 +274,12 @@ def main():
                     continue
 
                 # ── Trigger gate ────────────────────────────────────
-                if trigger != TRIGGER_ALL:
-                    mentioned = any(n in body.lower() for n in bot_names if n)
-                    replying_to_bot = parent_id and parent_id in our_message_ids
-                    if not (mentioned or replying_to_bot):
-                        print(
-                            f"[bot] 🔄 Skipping (trigger={trigger}, no mention/reply)"
-                        )
-                        continue
-                    # smart mode: further LLM relevance check (future)
-                    # if trigger == TRIGGER_SMART:
-                    #     ... lightweight pi call ...
+                decision = should_respond(
+                    body, trigger, bot_names, parent_id, our_message_ids
+                )
+                if not decision:
+                    print(f"[bot] 🔄 Skipping (trigger={trigger}, no mention/reply)")
+                    continue
                 # (Future: add a lightweight pi call here to check relevance)
 
                 if args.dry_run:
