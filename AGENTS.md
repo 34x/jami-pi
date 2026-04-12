@@ -2,6 +2,8 @@
 
 > This file provides project context for AI coding agents working on jami-pi.
 
+**Unofficial community project:** This is not an official project of [Jami](https://jami.net) or [pi](https://pi.dev). It is an independent bridge between the two.
+
 ## Project Overview
 
 **jami-pi** is a Python chat bot that bridges Jami conversations to the pi

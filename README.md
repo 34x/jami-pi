@@ -1,6 +1,9 @@
 # jami-pi: Jami ↔ pi Chat Bridge
 
-A bot that bridges Jami conversations to the pi AI coding agent.
+A community-made bridge between Jami and pi — **not an official project of either**.
+
+- Jami: https://jami.net
+- pi: https://pi.dev
 
 ## How It Works
 
@@ -14,9 +17,11 @@ pushed from bridge to bot in real-time — no polling needed.
 
 ## Requirements
 
-- **jami-bridge** binary (in PATH, set `JAMI_BRIDGE_PATH` env, or specify with `--jami`)
-- **pi** CLI installed and configured
+- **[jami-bridge](https://jami.net)** binary (in PATH, set `JAMI_BRIDGE_PATH` env, or specify with `--jami`)
+- **[pi](https://pi.dev)** CLI installed and configured
 - **python3** ≥3.9 (stdlib only — no extra packages). **Linux/macOS required** (uses `fcntl`).
+
+This is an **unofficial community project**. It is not affiliated with, endorsed by, or officially connected to the Jami or pi projects.
 
 ## Usage
 
