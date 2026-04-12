@@ -413,7 +413,12 @@ def main():
         default=None,
         help="Path to jami-sdk binary (or set JAMI_SDK_PATH env)",
     )
-    parser.add_argument("--account", default=None, help="Account ID (auto-detect)")
+    parser.add_argument(
+        "--account", default=None, help="Account ID or URI (auto-detect)"
+    )
+    parser.add_argument(
+        "--list-accounts", action="store_true", help="List accounts and exit"
+    )
     parser.add_argument("--conversation", default=None, help="Conversation to monitor")
     parser.add_argument(
         "--history",
@@ -457,24 +462,51 @@ def main():
     sdk.start()
 
     # ── Discover account ─────────────────────────────────────────────
+    result = sdk.call("listAccounts")
+    accounts = result.get("accounts", [])
+
+    if args.list_accounts:
+        if not accounts:
+            print("No accounts found.")
+        else:
+            for aid in accounts:
+                details = sdk.call("getAccountDetails", {"accountId": aid})
+                d = details.get("details") or {}
+                uri = d.get("Account.username", "?")
+                alias = d.get("Account.alias", "?")
+                print(f"{aid}  uri={uri}  alias={alias}")
+        sdk.stop()
+        return
+
+    # Resolve account: by ID, by URI, or auto-detect
     if args.account:
-        account_id = args.account
-    else:
-        try:
-            result = sdk.call("listAccounts")
-            accounts = result.get("accounts", [])
-            if not accounts:
-                print("No accounts found. Create one first.")
+        # Check if it's a valid account ID first
+        if args.account in accounts:
+            account_id = args.account
+        else:
+            # Try matching by URI
+            account_id = None
+            for aid in accounts:
+                details = sdk.call("getAccountDetails", {"accountId": aid})
+                d = details.get("details") or {}
+                if d.get("Account.username") == args.account:
+                    account_id = aid
+                    break
+            if not account_id:
+                print(f"Account not found: {args.account}")
+                print(f"Available accounts: {', '.join(accounts)}")
                 sys.exit(1)
-            account_id = accounts[0]
-        except Exception as e:
-            print(f"Cannot connect to jami-sdk: {e}")
+    else:
+        if not accounts:
+            print("No accounts found. Create one first.")
             sys.exit(1)
+        account_id = accounts[0]
 
     # Get our own URI so we can ignore our own messages
     details = sdk.call("getAccountDetails", {"accountId": account_id})
-    our_uri = details.get("details", {}).get("Account.username", "")
-    our_alias = details.get("details", {}).get("Account.alias", "bot")
+    d = details.get("details") or {}
+    our_uri = d.get("Account.username", "")
+    our_alias = d.get("Account.alias", "bot")
 
     # Register our own name in the known senders
     known_senders[our_uri] = our_alias or "bot"
