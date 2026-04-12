@@ -1,0 +1,12 @@
+[project]
+name = "jami-bot-pi"
+version = "0.1.0"
+description = "Jami <-> pi coding agent chat bridge"
+requires-python = ">=3.9"
+
+[tool.ruff]
+src = ["."]
+
+[tool.ruff.lint]
+# F821: ruff can't resolve local module imports when run from parent dir
+ignore = ["F821"]
