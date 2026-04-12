@@ -287,6 +287,28 @@ def main():
     bot_log(f"[bot] History: {args.history} messages as context")
     bot_log(f"[bot] Ack: {'disabled' if args.no_ack else 'enabled'}")
 
+    # Send greeting to all known conversations now (they're already loaded).
+    # For conversations that sync later (e.g. auto-accepted), the
+    # onConversationReady handler in the event loop sends the greeting.
+    if greeting_text:
+        greeted_count = 0
+        for conv_id, conv in conversations.items():
+            conv.greeted = True
+            try:
+                sdk.call(
+                    "sendMessage",
+                    {
+                        "accountId": account_id,
+                        "conversationId": conv_id,
+                        "body": greeting_text,
+                    },
+                )
+                greeted_count += 1
+            except Exception as e:
+                bot_warn(f"[bot] ⚠️  Greeting failed in {_short_id(conv_id)}: {e}")
+        if greeted_count:
+            bot_log(f"[bot] 👋 Greeting sent to {greeted_count} conversation(s)")
+
     bot_log("[bot] Ready. (Ctrl+C to stop)")
     print()
 
