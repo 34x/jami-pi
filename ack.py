@@ -35,8 +35,9 @@ class AckManager:
             lines.append(f"model: {self.model}")
         if self.tokens:
             lines.append(f"tokens: {self.tokens}")
-        for name, tool_status in self.tools:
-            lines.append(f"tool: {name} ({tool_status})")
+        for label, tool_status in self.tools:
+            icon = "✓" if tool_status == "done" else "⟳"
+            lines.append(f"tool: {label} {icon}")
         return "\n".join(lines)
 
     def send_initial(self):

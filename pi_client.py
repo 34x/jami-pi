@@ -9,6 +9,30 @@ import time
 from config import CANCELLED_MARKER
 
 
+def _tool_label(name, args):
+    """Build a readable label for a tool call: 'read bot.py', 'edit foo.sh', etc."""
+    path = args.get("path", "")
+    if path:
+        # Shorten to just the filename (no directory)
+        short = path.rsplit("/", 1)[-1]
+        offset = args.get("offset")
+        if offset and name == "read":
+            return f"{name} {short}:{offset}"
+        return f"{name} {short}"
+    command = args.get("command", "")
+    if command:
+        # Show first line of command, up to 60 chars
+        first_line = command.split("\n")[0]
+        short = first_line[:60]
+        if len(first_line) > 60:
+            short += "…"
+        return f"{name} {short}"
+    pattern = args.get("pattern", "")
+    if pattern:
+        return f"{name} {pattern}"
+    return name
+
+
 def call_pi(
     prompt,
     session_file=None,
@@ -56,7 +80,7 @@ def call_pi(
     text_so_far = ""
     last_progress = 0
     model = ""
-    tools = []  # list of (name, status) — status is "running" or "done"
+    tools = []  # list of (label, status) — label is like "read foo.py", status is "running" or "done"
     buf = ""
 
     state = {"tokens": 0, "text": "", "tools": [], "model": ""}
@@ -94,16 +118,21 @@ def call_pi(
 
         # Track tool calls
         elif etype == "tool_execution_start":
-            tools.append((event.get("toolName", "?"), "running"))
+            name = event.get("toolName", "?")
+            args = event.get("args", {})
+            label = _tool_label(name, args)
+            tools.append((label, "running"))
             state["tools"] = list(tools)
             state["force_update"] = True
             if on_progress:
                 on_progress(state)
         elif etype == "tool_execution_end":
             name = event.get("toolName", "?")
+            # Find matching running entry by tool name prefix
             for i in range(len(tools) - 1, -1, -1):
-                if tools[i][0] == name and tools[i][1] == "running":
-                    tools[i] = (name, "done")
+                # label starts with the tool name ("read ...", "edit ...", etc.)
+                if tools[i][0].startswith(name) and tools[i][1] == "running":
+                    tools[i] = (tools[i][0], "done")
                     break
             state["tools"] = list(tools)
             state["force_update"] = True
