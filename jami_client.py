@@ -47,7 +47,7 @@ class JamiStdioClient:
         self.pending = {}
         self.pending_results = {}
         self.notifications = queue.Queue()
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()  # protects pending dict + stdin writes
         self.next_id = 1
         self._buf = ""
 
@@ -110,10 +110,11 @@ class JamiStdioClient:
             self.pending[id] = event
             self.pending_results[id] = None
 
-        # Write to stdin
-        if self.proc and self.proc.stdin:
-            self.proc.stdin.write((req_json + "\n").encode("utf-8"))
-            self.proc.stdin.flush()
+        # Write to stdin (lock protects against concurrent writes from pi threads)
+        with self.lock:
+            if self.proc and self.proc.stdin:
+                self.proc.stdin.write((req_json + "\n").encode("utf-8"))
+                self.proc.stdin.flush()
 
         # Wait for response
         if not event.wait(timeout=timeout):

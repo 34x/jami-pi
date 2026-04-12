@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """jami-pi: Jami <-> pi chat bridge.
 
-Connects a Jami conversation to a pi coding agent, forwarding messages
+Connects Jami conversations to a pi coding agent, forwarding messages
 and streaming back progress updates using editable ack messages.
+
+Supports multiple conversations simultaneously — each conversation gets
+its own pi session, member tracking, and independent processing.
 
 See: python3 bot.py --help
 """
@@ -54,6 +57,21 @@ def bot_verbose(msg):
         print(msg, file=sys.stderr)
 
 
+# ── Per-conversation state ──────────────────────────────────────────────
+
+
+class Conversation:
+    """Tracks state for a single Jami conversation."""
+
+    def __init__(self, conv_id, member_count=0):
+        self.conv_id = conv_id
+        self.member_count = member_count
+        self.our_message_ids = set()  # bot's own message IDs (for reply detection)
+        self.busy = False  # True while pi is processing a request
+        self.cancel = None  # threading.Event to cancel current pi call
+        self.sender_uri = None  # who we're currently processing
+
+
 def main():
     parser = argparse.ArgumentParser(description="jami-pi: Jami <-> pi chat bridge")
     parser.add_argument(
@@ -67,7 +85,6 @@ def main():
     parser.add_argument(
         "--list-accounts", action="store_true", help="List accounts and exit"
     )
-    parser.add_argument("--conversation", default=None, help="Conversation to monitor")
     parser.add_argument(
         "--history",
         type=int,
@@ -79,7 +96,6 @@ def main():
         default=DEFAULT_SESSION_DIR,
         help=f"pi session directory (default: {DEFAULT_SESSION_DIR})",
     )
-
     parser.add_argument(
         "--no-session", action="store_true", help="Disable pi sessions (stateless)"
     )
@@ -95,7 +111,7 @@ def main():
     parser.add_argument(
         "--bridge-args",
         default="",
-        help="Extra bridge args (space-separated, e.g. '--auto-accept-from jami://abc')",
+        help="Extra bridge args (space-separated, e.g. '--auto-accept-from abc123')",
     )
     parser.add_argument(
         "--trigger",
@@ -125,9 +141,6 @@ def main():
     pi_extra = args.pi_args.split() if args.pi_args else None
     use_sessions = not args.no_session
     os.makedirs(args.session_dir, exist_ok=True)
-
-    # Track sender names for readable conversation formatting
-    known_senders = {}
 
     # Resolve bridge args: --bridge-args string (space-split, like --pi-args)
     bridge_args = args.bridge_args.split() if args.bridge_args else []
@@ -186,9 +199,6 @@ def main():
     our_uri = d.get("Account.username", "")
     our_alias = d.get("Account.alias", "bot")
 
-    # Register our own name in the known senders
-    known_senders[our_uri] = our_alias or "bot"
-
     # ── Build trigger names from alias + URI fragment ────────────────
     bot_names = []
     if our_alias:
@@ -197,8 +207,6 @@ def main():
     uri_short = our_uri.rsplit(":", 1)[-1][-8:] if ":" in our_uri else our_uri[-8:]
     if uri_short and uri_short not in bot_names:
         bot_names.append(uri_short.lower())
-    # Track message IDs we send, for reply-to-bot detection
-    our_message_ids = set()
 
     trigger = args.trigger
     bot_log(f"[bot] Account: {account_id}")
@@ -206,143 +214,249 @@ def main():
     bot_log(f"[bot] Our alias: {our_alias}")
     bot_log(f"[bot] Trigger: {trigger} (names: {bot_names})")
 
-    # ── Discover conversation ─────────────────────────────────────────
+    # ── Shared state ─────────────────────────────────────────────────
+    # known_senders is global across conversations (URIs are unique)
+    known_senders = {our_uri: our_alias or "bot"}
+
+    # Per-conversation state: conv_id -> Conversation
+    conversations = {}
+
+    # Pi result queue: (conv_id, reply_or_CANCELLED_MARKER, ack, partial_text)
+    pi_results = []
+
+    # ── Greeting ─────────────────────────────────────────────────────
+    greeting_text = None
+    if args.greeting.lower() not in ("false", "no", "off", "0", "none"):
+        greeting_text = args.greeting if args.greeting != "online" else "🟢 I'm online!"
+
+    # ── Conversation helpers ─────────────────────────────────────────
+
+    def _register_conversation(conv_id: str) -> Conversation:
+        """Register a conversation and discover its members. Returns the Conversation object."""
+        conv = Conversation(conv_id)
+        conversations[conv_id] = conv
+        try:
+            conv_detail = sdk.call(
+                "getConversation", {"accountId": account_id, "conversationId": conv_id}
+            )
+            conv.member_count = conv_detail.get("memberCount", 2)
+            for member in conv_detail.get("members", []):
+                uri = member.get("uri", "")
+                if uri and uri not in known_senders:
+                    known_senders[uri] = uri[-8:] if len(uri) > 8 else uri
+        except Exception as e:
+            bot_warn(f"[bot] ⚠️  Failed to load conversation {conv_id}: {e}")
+        return conv
+
+    def _short_id(conv_id: str) -> str:
+        """Short conversation ID for display."""
+        return conv_id[:12]
+
+    _ = _short_id  # used below
+
+    # ── Discover conversations ────────────────────────────────────────
     has_auto_accept = any(
         a in ("--auto-accept", "--auto-accept-from") for a in bridge_args
     )
 
-    if args.conversation:
-        conv_id = args.conversation
-    else:
-        convs = sdk.call("listConversations", {"accountId": account_id})
-        convs = convs.get("conversations", [])
+    convs_raw = sdk.call("listConversations", {"accountId": account_id})
+    convs_list = convs_raw.get("conversations", [])
 
-        if not convs:
-            if has_auto_accept:
-                conv_id = None
-                bot_log(
-                    "[bot] No conversations yet — waiting for auto-accepted invite..."
-                )
-            else:
-                print(
-                    "No conversations found. Create one first, or use --bridge-args '--auto-accept' to auto-accept invites."
-                )
-                sys.exit(1)
+    if not convs_list:
+        if has_auto_accept:
+            bot_log("[bot] No conversations yet — waiting for auto-accepted invite...")
         else:
-            # Prefer conversation with >1 member
-            multi = [c for c in convs if c.get("members", 1) > 1]
-            if multi:
-                conv_id = multi[0]["id"]
-                conv_title = multi[0].get("title", "")
-                bot_log(
-                    f"[bot] Auto-selected: {conv_title or conv_id[:12]}... ({multi[0]['members']} members)"
-                )
-            else:
-                conv_id = convs[0]["id"]
-                bot_log("[bot] Only 1-member conversations found, using first")
-
-    # Register other members' names and get member count
-    if conv_id:
-        conv_detail = sdk.call(
-            "getConversation", {"accountId": account_id, "conversationId": conv_id}
-        )
-        member_count = conv_detail.get("memberCount", 2)
-        for member in conv_detail.get("members", []):
-            uri = member.get("uri", "")
-            if uri and uri not in known_senders:
-                known_senders[uri] = uri[-8:] if len(uri) > 8 else uri
+            print(
+                "No conversations found. Create one first, or use --bridge-args '--auto-accept' to auto-accept invites."
+            )
+            sys.exit(1)
     else:
-        member_count = 0
+        for c in convs_list:
+            cid = c.get("id", "")
+            if cid:
+                conv = _register_conversation(cid)
+                title = c.get("title", "") or cid[:12]
+                bot_log(f"[bot] Conversation: {title}... ({conv.member_count} members)")
 
-    bot_log(
-        f"[bot] Conversation: {conv_id or '(waiting for invite)'} ({member_count} members)"
-    )
+    bot_log(f"[bot] Monitoring {len(conversations)} conversation(s)")
     if use_sessions:
-        bot_log(f"[bot] Session: {session_path(conv_id, args.session_dir)}")
+        bot_log(f"[bot] Session dir: {args.session_dir}")
     else:
         bot_log("[bot] Sessions disabled (stateless mode)")
     bot_log(f"[bot] History: {args.history} messages as context")
     bot_log(f"[bot] Ack: {'disabled' if args.no_ack else 'enabled'}")
 
-    # ── Send greeting ───────────────────────────────────────────────────
-    greeting_text = None
-    if args.greeting.lower() not in ("false", "no", "off", "0", "none"):
-        greeting_text = args.greeting if args.greeting != "online" else "🟢 I'm online!"
+    # Send greeting to all conversations
+    if greeting_text:
+        for conv_id, conv in conversations.items():
+            if conv.member_count > 1:
+                try:
+                    sdk.call(
+                        "sendMessage",
+                        {
+                            "accountId": account_id,
+                            "conversationId": conv_id,
+                            "body": greeting_text,
+                        },
+                    )
+                except Exception as e:
+                    bot_warn(f"[bot] ⚠️  Greeting failed in {conv_id}: {e}")
+        bot_log("[bot] 👋 Greeting sent")
 
-    if greeting_text and conv_id:
+    bot_log("[bot] Waiting for messages... (Ctrl+C to stop)")
+    print()
+
+    # ── Pi call helpers ──────────────────────────────────────────────
+
+    def _start_pi_for_conversation(conv: Conversation, params: dict):
+        """Start a pi call for a conversation. Called from the main loop."""
+        conv.busy = True
+        conv.cancel = threading.Event()
+        conv.sender_uri = params.get("from", "")
+
+        # Send acknowledgment (from main loop — safe to call sdk)
+        ack = AckManager(sdk, account_id, conv.conv_id, our_uri, no_ack=args.no_ack)
+        ack.send_initial()
+
+        # Prepare prompt with conversation context
+        sfile = session_path(conv.conv_id, args.session_dir) if use_sessions else None
+        first_message = sfile and is_new_session(sfile)
+
+        if first_message:
+            try:
+                hist = sdk.call(
+                    "loadMessages",
+                    {
+                        "accountId": account_id,
+                        "conversationId": conv.conv_id,
+                        "count": args.history,
+                    },
+                )
+                conversation_history = list(reversed(hist.get("messages", [])))
+            except Exception:
+                conversation_history = None
+            prompt = build_prompt(
+                params, conversation_history, our_uri, known_senders, conv.member_count
+            )
+        elif use_sessions:
+            prompt = build_prompt(
+                params, None, our_uri, known_senders, conv.member_count
+            )
+        else:
+            try:
+                hist = sdk.call(
+                    "loadMessages",
+                    {
+                        "accountId": account_id,
+                        "conversationId": conv.conv_id,
+                        "count": args.history,
+                    },
+                )
+                conversation_history = list(reversed(hist.get("messages", [])))
+            except Exception:
+                conversation_history = None
+            prompt = build_prompt(
+                params, conversation_history, our_uri, known_senders, conv.member_count
+            )
+
+        mode_label = (
+            "new" if first_message else "continued" if use_sessions else "history"
+        )
+        bot_log(
+            f"[bot] 🤖 Calling pi ({mode_label} session) for {_short_id(conv.conv_id)}..."
+        )
+
+        # Mutable containers for the pi thread to write results into
+        pi_result_box = [None]
+        partial_text_box = [""]
+
+        def _on_progress(state):
+            """Wrap ack.on_progress to also capture partial text for cancellation."""
+            if state.get("text"):
+                partial_text_box[0] = state["text"]
+            ack.on_progress(state)
+
+        def _run_pi():
+            """Run pi in a background thread and put result in the shared queue."""
+            pi_result_box[0] = call_pi(
+                prompt,
+                session_file=sfile,
+                extra_args=pi_extra,
+                on_progress=_on_progress,
+                cancel=conv.cancel,
+            )
+            # Put result for the main loop to pick up
+            pi_results.append(
+                (conv.conv_id, pi_result_box[0], ack, partial_text_box[0])
+            )
+
+        t = threading.Thread(target=_run_pi, daemon=True)
+        t.start()
+
+    def _send_reply(conv_id: str, reply: str, ack: AckManager):
+        """Send a pi reply to a conversation (called from main loop)."""
+        conv = conversations.get(conv_id)
+        if not conv:
+            return
+
+        # Handle silent response
+        if reply.strip() == SILENT_MARKER:
+            bot_log("[bot] 🤫 pi chose to stay silent")
+            ack.mark_done()
+            conv.busy = False
+            conv.cancel = None
+            conv.sender_uri = None
+            return
+
+        reply_preview = reply[:100] + ("..." if len(reply) > 100 else "")
+        bot_log(f"[bot] 🤖 Reply for {_short_id(conv_id)}: {reply_preview}")
+
         try:
             sdk.call(
                 "sendMessage",
                 {
                     "accountId": account_id,
                     "conversationId": conv_id,
-                    "body": greeting_text,
+                    "body": reply,
                 },
             )
-            bot_log("[bot] 👋 Greeting sent")
+            bot_log("[bot] ✅ Reply sent")
+            ack.mark_done()
         except Exception as e:
-            bot_warn(f"[bot] ⚠️  Greeting failed: {e}")
+            bot_warn(f"[bot] ❌ Failed to send reply: {e}")
 
-    bot_log("[bot] Waiting for messages... (Ctrl+C to stop)")
-    print()
+        conv.busy = False
+        conv.cancel = None
+        conv.sender_uri = None
 
     # ── Main event loop ────────────────────────────────────────────────
-    def _on_new_conversation(new_conv_id: str):
-        """Called when a conversation becomes ready (e.g. after auto-accept).
-
-        Always registers the new conversation's members.
-        Switches target conversation only if we don't have one yet.
-        """
-        nonlocal conv_id, member_count
-
-        # Discover members of the new conversation
-        try:
-            conv_detail = sdk.call(
-                "getConversation",
-                {"accountId": account_id, "conversationId": new_conv_id},
-            )
-            new_member_count = conv_detail.get("memberCount", 2)
-            for member in conv_detail.get("members", []):
-                uri = member.get("uri", "")
-                if uri and uri not in known_senders:
-                    known_senders[uri] = uri[-8:] if len(uri) > 8 else uri
-        except Exception as e:
-            bot_warn(f"[bot] ⚠️  Failed to load conversation {new_conv_id}: {e}")
-            new_member_count = 0
-
-        if conv_id is not None:
-            # Already monitoring a conversation — log but don't switch
-            bot_log(
-                f"[bot] 📨 New conversation ready: {new_conv_id[:12]}... ({new_member_count} members), staying on {conv_id[:12]}..."
-            )
-            return
-
-        # No target yet — switch to this conversation
-        conv_id = new_conv_id
-        member_count = new_member_count
-        bot_log(
-            f"[bot] 📨 New conversation accepted: {conv_id} ({member_count} members)"
-        )
-
-        # Send greeting if configured
-        if greeting_text:
-            try:
-                sdk.call(
-                    "sendMessage",
-                    {
-                        "accountId": account_id,
-                        "conversationId": conv_id,
-                        "body": greeting_text,
-                    },
-                )
-                bot_log("[bot] 👋 Greeting sent")
-            except Exception as e:
-                bot_warn(f"[bot] ⚠️  Greeting failed: {e}")
-
     try:
         while True:
-            event = sdk.get_notification(timeout=1.0)
+            # ── Drain pi results first ──────────────────────────────────
+            while pi_results:
+                conv_id, reply, ack, _ = pi_results.pop(0)
+                conv = conversations.get(conv_id)
+                if not conv:
+                    continue
+                if reply == CANCELLED_MARKER:
+                    # Already handled in the cancel code path
+                    conv.busy = False
+                    conv.cancel = None
+                    conv.sender_uri = None
+                    continue
+                if reply is None:
+                    bot_warn(
+                        f"[bot] ⚠️  pi thread returned no result for {_short_id(conv_id)}"
+                    )
+                    ack.mark_done()
+                    conv.busy = False
+                    conv.cancel = None
+                    conv.sender_uri = None
+                    continue
+                _send_reply(conv_id, reply, ack)
 
+            # ── Get next event ───────────────────────────────────────────
+            event = sdk.get_notification(timeout=0.5)
             if not event:
                 continue
 
@@ -352,8 +466,24 @@ def main():
             # ── Handle conversation ready (new/accepted conversation) ───
             if method == "onConversationReady":
                 ready_conv_id = params.get("conversationId", "")
-                if ready_conv_id:
-                    _on_new_conversation(ready_conv_id)
+                if ready_conv_id and ready_conv_id not in conversations:
+                    conv = _register_conversation(ready_conv_id)
+                    bot_log(
+                        f"[bot] 📨 New conversation ready: {_short_id(ready_conv_id)}... ({conv.member_count} members)"
+                    )
+                    # Send greeting to the new conversation
+                    if greeting_text:
+                        try:
+                            sdk.call(
+                                "sendMessage",
+                                {
+                                    "accountId": account_id,
+                                    "conversationId": ready_conv_id,
+                                    "body": greeting_text,
+                                },
+                            )
+                        except Exception as e:
+                            bot_warn(f"[bot] ⚠️  Greeting failed: {e}")
                 continue
 
             # ── Handle member joins/leaves ───────────────────────────────
@@ -362,240 +492,115 @@ def main():
                 member_uri = params.get("memberUri", "")
                 evt_type = params.get("event", -1)
                 # event: 0=add, 1=joins, 2=leave, 3=banned
-                if evt_conv_id == conv_id and member_uri:
+                conv = conversations.get(evt_conv_id)
+                if conv and member_uri:
                     if evt_type in (0, 1):
-                        # Added or joined — register sender name
                         if member_uri not in known_senders:
                             known_senders[member_uri] = member_uri[-8:]
                         action = "joined" if evt_type == 1 else "added"
-                        bot_log(f"[bot] 👤 {known_senders[member_uri]} {action}")
+                        bot_log(
+                            f"[bot] 👤 {known_senders[member_uri]} {action} in {_short_id(evt_conv_id)}"
+                        )
                     elif evt_type == 2:
                         bot_log(
-                            f"[bot] 👤 {known_senders.get(member_uri, member_uri[-8:])} left"
+                            f"[bot] 👤 {known_senders.get(member_uri, member_uri[-8:])} left {_short_id(evt_conv_id)}"
                         )
                     elif evt_type == 3:
                         bot_log(
-                            f"[bot] 👤 {known_senders.get(member_uri, member_uri[-8:])} banned"
+                            f"[bot] 👤 {known_senders.get(member_uri, member_uri[-8:])} banned from {_short_id(evt_conv_id)}"
                         )
                 continue
 
-            # ── Skip message events if we have no target conversation ──
-            if conv_id is None:
+            # ── Handle messages ───────────────────────────────────────────
+            if method != "onMessageReceived":
                 continue
 
-            if method == "onMessageReceived":
-                sender_uri = params.get("from", "")
-                body = params.get("body", "").strip()
-                msg_type = params.get("type", "")
-                conv_id_event = params.get("conversationId", "")
-                msg_id = params.get("id", "")
-                parent_id = params.get("parentId", "")
+            sender_uri = params.get("from", "")
+            body = params.get("body", "").strip()
+            msg_type = params.get("type", "")
+            conv_id_event = params.get("conversationId", "")
+            msg_id = params.get("id", "")
+            parent_id = params.get("parentId", "")
 
-                # Only process text messages in our target conversation
-                if msg_type != "text/plain" or not body or conv_id_event != conv_id:
-                    continue
+            # Only process text messages
+            if msg_type != "text/plain" or not body:
+                continue
 
-                # Skip our own messages — but track message IDs for reply detection
-                if sender_uri == our_uri:
-                    if msg_id:
-                        our_message_ids.add(msg_id)
-                    continue
+            # Track our own message IDs for reply detection (all conversations)
+            if sender_uri == our_uri:
+                # Find the conversation and track the message ID
+                conv = conversations.get(conv_id_event)
+                if conv and msg_id:
+                    conv.our_message_ids.add(msg_id)
+                continue
 
-                # Skip ack/status messages
-                if body.startswith(ACK_PREFIX):
-                    continue
+            # Skip ack/status messages
+            if body.startswith(ACK_PREFIX):
+                continue
 
-                # ── Trigger gate ────────────────────────────────────
-                decision = should_respond(
-                    body, trigger, bot_names, parent_id, our_message_ids
-                )
-                if not decision:
-                    bot_log(f"[bot] 🔄 Skipping (trigger={trigger}, no mention/reply)")
-                    continue
-                # (Future: add a lightweight pi call here to check relevance)
-
-                if args.dry_run:
-                    bot_log("[bot] (dry-run) Would send to pi")
-                    continue
-
-                # ── Send acknowledgment ───────────────────────────────
-                ack = AckManager(sdk, account_id, conv_id, our_uri, no_ack=args.no_ack)
-                ack.send_initial()
-
-                # ── Prepare prompt with conversation context ──────────
-                sfile = (
-                    session_path(conv_id, args.session_dir) if use_sessions else None
-                )
-                first_message = sfile and is_new_session(sfile)
-
-                if first_message:
-                    # New session — load recent conversation history
-                    try:
-                        hist = sdk.call(
-                            "loadMessages",
-                            {
-                                "accountId": account_id,
-                                "conversationId": conv_id,
-                                "count": args.history,
-                            },
-                        )
-                        conversation_history = list(reversed(hist.get("messages", [])))
-                    except Exception:
-                        conversation_history = None
-                    prompt = build_prompt(
-                        params,
-                        conversation_history,
-                        our_uri,
-                        known_senders,
-                        member_count,
-                    )
-                elif use_sessions:
-                    # Continued session — pi already has context
-                    prompt = build_prompt(
-                        params, None, our_uri, known_senders, member_count
-                    )
-                else:
-                    # No session — include history every time
-                    try:
-                        hist = sdk.call(
-                            "loadMessages",
-                            {
-                                "accountId": account_id,
-                                "conversationId": conv_id,
-                                "count": args.history,
-                            },
-                        )
-                        conversation_history = list(reversed(hist.get("messages", [])))
-                    except Exception:
-                        conversation_history = None
-                    prompt = build_prompt(
-                        params,
-                        conversation_history,
-                        our_uri,
-                        known_senders,
-                        member_count,
-                    )
-
-                # ── Call pi (threaded, cancellable) ──────────────────────
+            # Find (or auto-register) the conversation
+            conv = conversations.get(conv_id_event)
+            if conv is None:
+                # Auto-register conversations we haven't seen yet
+                # (e.g. 1:1 convs created while bot was running)
+                conv = _register_conversation(conv_id_event)
                 bot_log(
-                    f"[bot] 🤖 Calling pi ({'new' if first_message else 'continued' if use_sessions else 'history'} session)..."
+                    f"[bot] 📩 New conversation discovered: {_short_id(conv_id_event)}... ({conv.member_count} members)"
                 )
 
-                cancel = threading.Event()
-                pi_result = [None]  # mutable container for thread return value
-                partial_text = [""]  # track streaming text for cancel case
-
-                def _on_progress(state):
-                    """Wrap ack.on_progress to also capture partial text."""
-                    if state.get("text"):
-                        partial_text[0] = state["text"]
-                    ack.on_progress(state)
-
-                def _run_pi():
-                    pi_result[0] = call_pi(
-                        prompt,
-                        session_file=sfile,
-                        extra_args=pi_extra,
-                        on_progress=_on_progress,
-                        cancel=cancel,
+            # ── Handle busy conversation ──────────────────────────────
+            if conv.busy:
+                # Same sender: check for stop command
+                if sender_uri == conv.sender_uri and is_stop_command(body):
+                    bot_log(
+                        f"[bot] 🛑 Stop command in {_short_id(conv_id_event)}, cancelling pi..."
                     )
-
-                pi_thread = threading.Thread(target=_run_pi, daemon=True)
-                pi_thread.start()
-
-                # Poll for stop commands / busy-reject other messages while pi runs
-                while pi_thread.is_alive():
-                    evt = sdk.get_notification(timeout=0.5)
-                    if not evt or evt.get("method") != "onMessageReceived":
-                        continue
-                    p = evt.get("params", {})
-                    evt_body = p.get("body", "").strip()
-                    evt_conv = p.get("conversationId", "")
-                    evt_sender = p.get("from", "")
-                    evt_type = p.get("type", "")
-
-                    # Only process text messages in our target conversation
-                    if evt_type != "text/plain" or evt_conv != conv_id:
-                        continue
-                    # Skip our own and ack messages
-                    if evt_sender == our_uri or evt_body.startswith(ACK_PREFIX):
-                        continue
-
-                    # Same sender: check for stop command
-                    if evt_sender == sender_uri and is_stop_command(evt_body):
-                        bot_log("[bot] 🛑 Stop command received, cancelling pi...")
-                        cancel.set()
-                        pi_thread.join(timeout=5)
-                        if partial_text[0].strip():
-                            try:
-                                sdk.call(
-                                    "sendMessage",
-                                    {
-                                        "accountId": account_id,
-                                        "conversationId": conv_id,
-                                        "body": partial_text[0] + "\n[cancelled]",
-                                    },
-                                )
-                            except Exception:
-                                pass
-                        ack.mark_cancelled()
-                        break
-
-                    # Any other message while busy: ask sender to retry later
-                    busy_sender = format_sender(evt_sender, known_senders)
-                    bot_log(f"[bot] ⏳ Busy — message from {busy_sender} rejected")
-                    try:
-                        sdk.call(
-                            "sendMessage",
-                            {
-                                "accountId": account_id,
-                                "conversationId": conv_id,
-                                "body": "⏳ I'm still working on a request. Please resend your message later.",
-                            },
-                        )
-                    except Exception:
-                        pass
-
-                if not cancel.is_set():
-                    pi_thread.join()
-
-                reply = pi_result[0]
-                if reply is None:
-                    # Thread didn't complete — shouldn't happen
-                    bot_warn("[bot] ⚠️  pi thread returned no result")
-                    ack.mark_done()
+                    conv.cancel.set()
                     continue
 
-                if reply == CANCELLED_MARKER:
-                    # Already handled above, but just in case
-                    continue
-
-                reply_preview = reply[:100] + ("..." if len(reply) > 100 else "")
-                bot_log(f"[bot] 🤖 Reply: {reply_preview}")
-
-                # ── Handle silent response ──────────────────────
-                if reply.strip() == SILENT_MARKER:
-                    bot_log("[bot] 🤫 pi chose to stay silent")
-                    ack.mark_done()
-                    continue
-
-                # ── Send reply ────────────────────────────────────────
+                # Any other message while busy: ask sender to retry later
+                busy_sender = format_sender(sender_uri, known_senders)
+                bot_log(
+                    f"[bot] ⏳ Busy in {_short_id(conv_id_event)} — message from {busy_sender} rejected"
+                )
                 try:
                     sdk.call(
                         "sendMessage",
                         {
                             "accountId": account_id,
-                            "conversationId": conv_id,
-                            "body": reply,
+                            "conversationId": conv_id_event,
+                            "body": "⏳ I'm still working on a request. Please resend your message later.",
                         },
                     )
-                    bot_log("[bot] ✅ Reply sent")
-                    ack.mark_done()
-                except Exception as e:
-                    bot_warn(f"[bot] ❌ Failed to send reply: {e}")
+                except Exception:
+                    pass
+                continue
+
+            # ── Trigger gate ──────────────────────────────────────────
+            decision = should_respond(
+                body, trigger, bot_names, parent_id, conv.our_message_ids
+            )
+            if not decision:
+                bot_verbose(
+                    f"[bot] 🔄 Skipping (trigger={trigger}, no mention/reply) in {_short_id(conv_id_event)}"
+                )
+                continue
+
+            if args.dry_run:
+                bot_log(
+                    f"[bot] (dry-run) Would send to pi for {_short_id(conv_id_event)}"
+                )
+                continue
+
+            # ── Start pi call ─────────────────────────────────────────
+            _start_pi_for_conversation(conv, params)
 
     except KeyboardInterrupt:
         bot_log("\n[bot] Stopping...")
+        # Cancel any running pi calls
+        for conv in conversations.values():
+            if conv.busy and conv.cancel:
+                conv.cancel.set()
         sdk.stop()
         bot_log("[bot] Stopped.")
 
