@@ -2,8 +2,9 @@
 name = "jami-pi"
 version = "0.1.0"
 description = "Jami <-> pi coding agent chat bridge"
-requires-python = ">=3.9"
 readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.9"
 
 [tool.ruff]
 src = ["."]
