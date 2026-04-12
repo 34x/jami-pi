@@ -13,6 +13,7 @@ Options:
     --system-prompt TEXT System prompt for pi (default: system-prompt.md)
     --no-session       Don't use pi sessions (stateless, each call is blank slate)
     --no-ack           Don't send "received" acknowledgment messages
+    --greeting TEXT    Send greeting on startup (default: "online", "false" to disable, or custom text)
     --pi-args ARGS     Extra arguments passed to pi
     --dry-run          Don't actually call pi, just print what would be sent
     --help             Show this help
@@ -442,6 +443,11 @@ def main():
     parser.add_argument(
         "--no-ack", action="store_true", help="Don't send acknowledgment messages"
     )
+    parser.add_argument(
+        "--greeting",
+        default="online",
+        help='Send a greeting on startup to all conversations: "online" (default), custom text, or "false" to disable',
+    )
     parser.add_argument("--pi-args", default="", help="Extra pi args (space-separated)")
     parser.add_argument("--dry-run", action="store_true", help="Don't call pi")
     args = parser.parse_args()
@@ -554,6 +560,40 @@ def main():
         print("[bot] Sessions disabled (stateless mode)")
     print(f"[bot] History: {args.history} messages as context")
     print(f"[bot] Ack: {'disabled' if args.no_ack else 'enabled'}")
+
+    # ── Send greeting ───────────────────────────────────────────────────
+    greeting_text = None
+    if args.greeting.lower() not in ("false", "no", "off", "0", "none"):
+        greeting_text = args.greeting if args.greeting != "online" else "🟢 I'm online!"
+
+    if greeting_text:
+        greeting_convs = []
+        if args.conversation:
+            # Only greet the specified conversation
+            greeting_convs = [args.conversation]
+        else:
+            # Greet all conversations the bot is a member of
+            all_convs = sdk.call("listConversations", {"accountId": account_id})
+            greeting_convs = [
+                c["id"]
+                for c in all_convs.get("conversations", [])
+                if c.get("members", 1) > 1
+            ]
+
+        for cid in greeting_convs:
+            try:
+                sdk.call(
+                    "sendMessage",
+                    {
+                        "accountId": account_id,
+                        "conversationId": cid,
+                        "body": greeting_text,
+                    },
+                )
+                print(f"[bot] 👋 Greeting sent to {cid[:12]}...")
+            except Exception as e:
+                print(f"[bot] ⚠️  Greeting failed for {cid[:12]}...: {e}")
+
     print("[bot] Waiting for messages... (Ctrl+C to stop)")
     print()
 
