@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+"""jami-bot-pi: Jami ↔ pi chat bridge using JSON-RPC over STDIO.
+
+Usage:
+    python3 bot.py [options]
+
+Options:
+    --jami PATH        Path to jami-sdk binary (default: jami-sdk in PATH)
+    --account ID       Jami account ID (default: auto-detect first account)
+    --conversation ID  Conversation ID to monitor (default: auto-detect)
+    --history N        Number of recent messages to include as context (default: 20)
+    --session-dir DIR  pi session directory (default: /tmp/jami-bot-sessions)
+    --system-prompt TEXT System prompt for pi (default: Jami bot context)
+    --no-session       Don't use pi sessions (stateless, each call is blank slate)
+    --no-ack           Don't send "received" acknowledgment messages
+    --pi-args ARGS     Extra arguments passed to pi
+    --dry-run          Don't actually call pi, just print what would be sent
+    --help             Show this help
+
+Architecture:
+
+    Jami user ↔ jami-sdk (STDIO) ↔ bot.py ↔ pi
+
+The bot launches jami-sdk --stdio as a subprocess and communicates
+via JSON-RPC over stdin/stdout. Events (messages, registration changes)
+are pushed from the SDK to the bot in real-time — no polling needed.
+
+Benefits over HTTP mode:
+- No port conflicts
+- No HTTP server needed
+- Real-time event push (no polling)
+- Simpler deployment (one process)
+"""
+
+import sys
+import os
+import json
+import time
+import subprocess
+import argparse
+import threading
+import queue
+
+# Unbuffered output
+sys.stdout.reconfigure(line_buffering=True)
+
+# ---------------------------------------------------------------------------
+# JSON-RPC Helpers
+# ---------------------------------------------------------------------------
+
+def jsonrpc_request(method, params=None, id=None):
+    """Create a JSON-RPC 2.0 request."""
+    req = {"jsonrpc": "2.0", "method": method}
+    if params:
+        req["params"] = params
+    if id is not None:
+        req["id"] = id
+    return req
+
+
+def is_response(obj):
+    """Check if a JSON object is a response (has 'id' and 'result' or 'error')."""
+    return "jsonrpc" in obj and obj.get("jsonrpc") == "2.0" and "id" in obj
+
+
+def is_notification(obj):
+    """Check if a JSON object is a notification (has 'method' but no 'id')."""
+    return "jsonrpc" in obj and obj.get("jsonrpc") == "2.0" and "method" in obj and "id" not in obj
+
+
+# ---------------------------------------------------------------------------
+# Jami SDK STDIO Client
+# ---------------------------------------------------------------------------
+
+class JamiStdioClient:
+    """JSON-RPC client that communicates with jami-sdk --stdio over stdin/stdout.
+
+    A single reader thread reads JSON lines from stdout and dispatches:
+    - Responses (with matching id) → unblock the pending call()
+    - Notifications (events) → put on the notification queue for the main loop
+    """
+
+    def __init__(self, jami_binary="jami-sdk"):
+        self.jami_binary = jami_binary
+        self.proc = None
+        self.next_id = 1
+        self.pending = {}          # id -> threading.Event
+        self.pending_results = {}  # id -> result or error
+        self.lock = threading.Lock()
+        self.notification_queue = queue.Queue()
+
+    def start(self):
+        """Start the jami-sdk --stdio subprocess."""
+        if self.proc:
+            return
+
+        # Build environment: inherit from parent + add lib/ dir to LD_LIBRARY_PATH
+        # for extra compatibility (if RPATH is not set, this is needed).
+        env = os.environ.copy()
+        binary_dir = os.path.dirname(os.path.abspath(self.jami_binary))
+        lib_dir = os.path.join(binary_dir, "lib")
+        if os.path.isdir(lib_dir):
+            existing = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = f"{lib_dir}:{existing}" if existing else lib_dir
+
+        # Start jami-sdk in stdio mode
+        self.proc = subprocess.Popen(
+            [self.jami_binary, "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line buffered
+            env=env,
+        )
+
+        # Single reader thread: reads stdout, dispatches responses and notifications
+        def reader():
+            for line in iter(self.proc.stdout.readline, ""):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if is_response(obj):
+                    rid = obj.get("id")
+                    with self.lock:
+                        if rid in self.pending:
+                            if "result" in obj:
+                                self.pending_results[rid] = obj["result"]
+                            elif "error" in obj:
+                                self.pending_results[rid] = Exception(
+                                    obj["error"].get("message", str(obj["error"]))
+                                )
+                            self.pending[rid].set()
+                        # else: response for unknown id, ignore
+                elif is_notification(obj):
+                    self.notification_queue.put(obj)
+                # else: unknown JSON object, ignore
+
+        threading.Thread(target=reader, daemon=True).start()
+
+        # Give it a moment to initialize
+        time.sleep(0.5)
+
+    def stop(self):
+        """Stop the subprocess."""
+        if self.proc:
+            try:
+                self.call("shutdown", {}, id=0)
+            except Exception:
+                pass
+            self.proc.terminate()
+            self.proc = None
+
+    def call(self, method, params=None, id=None, timeout=10.0):
+        """Send a JSON-RPC request and wait for the response.
+
+        Returns the 'result' dict on success.
+        Raises Exception on JSON-RPC error or timeout.
+        """
+        if id is None:
+            id = self.next_id
+            self.next_id += 1
+
+        req = jsonrpc_request(method, params, id)
+        req_json = json.dumps(req)
+
+        event = threading.Event()
+        with self.lock:
+            self.pending[id] = event
+            self.pending_results[id] = None
+
+        # Write to stdin
+        if self.proc and self.proc.stdin:
+            self.proc.stdin.write(req_json + "\n")
+            self.proc.stdin.flush()
+        else:
+            raise Exception("jami-sdk subprocess not running")
+
+        # Block until the reader thread dispatches our response
+        if not event.wait(timeout=timeout):
+            with self.lock:
+                self.pending.pop(id, None)
+                self.pending_results.pop(id, None)
+            raise Exception(f"Timeout waiting for response to {method} (id={id})")
+
+        with self.lock:
+            result = self.pending_results.pop(id, None)
+            self.pending.pop(id, None)
+
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def get_notification(self, timeout=1.0):
+        """Get the next event notification (if any).
+
+        Returns the notification dict, or None on timeout.
+        """
+        try:
+            return self.notification_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Session management
+# ---------------------------------------------------------------------------
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a chat bot on Jami messenger. "
+    "You receive conversation messages and may respond when appropriate. "
+    "Guidelines:\n"
+    "- In a 1:1 chat, always respond to messages directed at you.\n"
+    "- In a group chat, respond when addressed by name, when the conversation "
+    "is relevant to your expertise, or when you have something valuable to add. "
+    "You may also choose to stay silent if a message doesn't require your input.\n"
+    "- To stay silent, respond with exactly: __SILENT__\n"
+    "- Keep responses focused and conversational."
+)
+
+SILENT_MARKER = "__SILENT__"
+
+# Prefix for acknowledgment messages — used to filter them from pi context
+ACK_PREFIX = "💭 "
+
+def session_path(conv_id, session_dir):
+    """Return the pi session file path for a conversation."""
+    return os.path.join(session_dir, f"{conv_id}.json")
+
+
+def is_new_session(session_file):
+    """Check if this will be a new pi session (file doesn't exist yet)."""
+    return not os.path.exists(session_file)
+
+
+# ---------------------------------------------------------------------------
+# Message formatting
+# ---------------------------------------------------------------------------
+
+def format_sender(uri, known_senders):
+    """Return a short name for a sender URI. Track names in known_senders dict."""
+    if uri in known_senders:
+        return known_senders[uri]
+    # Use last 8 chars as short ID
+    short = uri[-8:] if len(uri) > 8 else uri
+    known_senders[uri] = short
+    return short
+
+
+def format_conversation_for_pi(messages, our_uri, known_senders):
+    """Format recent Jami messages into a conversation transcript for pi.
+
+    Filters out ack messages (💭 ...) so they don't pollute pi's context.
+    """
+    lines = []
+    for msg in messages:
+        sender_uri = msg.get("from", "")
+        body = msg.get("body", "").strip()
+        msg_type = msg.get("type", "")
+
+        # Only include text messages
+        if msg_type != "text/plain" or not body:
+            continue
+
+        # Filter out ack messages
+        if body.startswith(ACK_PREFIX):
+            continue
+
+        sender = format_sender(sender_uri, known_senders)
+        lines.append(f"[{sender}]: {body}")
+
+    return "\n".join(lines)
+
+
+def build_prompt(new_message, conversation_history, our_uri, known_senders, member_count=2):
+    """Build the prompt to send to pi."""
+    sender_uri = new_message.get("from", "")
+    body = new_message.get("body", "").strip()
+    sender = format_sender(sender_uri, known_senders)
+
+    context_lines = []
+    if member_count == 2:
+        context_lines.append("(1:1 chat)")
+    else:
+        context_lines.append(f"(group chat, {member_count} members)")
+
+    if conversation_history:
+        history_text = format_conversation_for_pi(conversation_history, our_uri, known_senders)
+        context_lines.append(f"Recent conversation:\n{history_text}")
+        context = "\n".join(context_lines)
+        return f"{context}\n\nNew message from [{sender}]: {body}"
+    else:
+        return f"[{sender}]: {body}"
+
+
+# ---------------------------------------------------------------------------
+# pi CLI interface
+# ---------------------------------------------------------------------------
+
+def call_pi(prompt, session_file=None, system_prompt=None, extra_args=None):
+    """Call pi in non-interactive JSON mode and return the assistant's reply text."""
+    cmd = ["pi", "--print", "--mode", "json", "--no-tools"]
+
+    if session_file:
+        cmd.extend(["--session", session_file])
+    else:
+        cmd.append("--no-session")
+
+    if system_prompt:
+        cmd.extend(["--append-system-prompt", system_prompt])
+
+    if extra_args:
+        cmd.extend(extra_args)
+
+    cmd.append(prompt)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return "[pi timed out after 120s]"
+    except FileNotFoundError:
+        return "[pi not found — is it installed?]"
+
+    # Parse JSON stream — we want the last "agent_end" event's assistant text
+    reply = None
+    for line in result.stdout.strip().splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "agent_end":
+            messages = event.get("messages", [])
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", [])
+                    for part in content:
+                        if part.get("type") == "text":
+                            reply = part["text"]
+                            break
+                    break
+    return reply or "[pi returned no text response]"
+
+
+# ---------------------------------------------------------------------------
+# Main bot loop
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="jami-bot-pi: Jami <-> pi chat bridge")
+    parser.add_argument("--jami", default=None,
+                        help="Path to jami-sdk binary (or set JAMI_SDK_PATH env)")
+    parser.add_argument("--account", default=None, help="Account ID (auto-detect)")
+    parser.add_argument("--conversation", default=None, help="Conversation to monitor")
+    parser.add_argument("--history", type=int, default=20,
+                        help="Recent messages to include as context (default: 20)")
+    parser.add_argument("--session-dir", default="/tmp/jami-bot-sessions",
+                        help="pi session directory (default: /tmp/jami-bot-sessions)")
+    parser.add_argument("--system-prompt", default=None,
+                        help="System prompt for pi (default: Jami bot context)")
+    parser.add_argument("--no-session", action="store_true",
+                        help="Don't use pi sessions (stateless)")
+    parser.add_argument("--no-ack", action="store_true",
+                        help="Don't send acknowledgment messages")
+    parser.add_argument("--pi-args", default="", help="Extra pi args (space-separated)")
+    parser.add_argument("--dry-run", action="store_true", help="Don't call pi")
+    args = parser.parse_args()
+
+    # Resolve jami-sdk binary path: --jami flag > JAMI_SDK_PATH env > PATH lookup
+    jami_binary = args.jami or os.environ.get("JAMI_SDK_PATH") or "jami-sdk"
+
+    system_prompt = args.system_prompt or DEFAULT_SYSTEM_PROMPT
+    pi_extra = args.pi_args.split() if args.pi_args else None
+    use_sessions = not args.no_session
+    os.makedirs(args.session_dir, exist_ok=True)
+
+    # Track sender names for readable conversation formatting
+    known_senders = {}
+
+    # ── Launch jami-sdk in stdio mode ────────────────────────────────────
+    sdk = JamiStdioClient(jami_binary=jami_binary)
+    sdk.start()
+
+    # ── Discover account ─────────────────────────────────────────────
+    if args.account:
+        account_id = args.account
+    else:
+        try:
+            result = sdk.call("listAccounts")
+            accounts = result.get("accounts", [])
+            if not accounts:
+                print("No accounts found. Create one first.")
+                sys.exit(1)
+            account_id = accounts[0]
+        except Exception as e:
+            print(f"Cannot connect to jami-sdk: {e}")
+            sys.exit(1)
+
+    # Get our own URI so we can ignore our own messages
+    details = sdk.call("getAccountDetails", {"accountId": account_id})
+    our_uri = details.get("details", {}).get("Account.username", "")
+    our_alias = details.get("details", {}).get("Account.alias", "bot")
+
+    # Register our own name in the known senders
+    known_senders[our_uri] = our_alias or "bot"
+
+    print(f"[bot] Account: {account_id}")
+    print(f"[bot] Our URI: {our_uri}")
+    print(f"[bot] Our alias: {our_alias}")
+
+    # ── Discover conversation ─────────────────────────────────────────
+    if args.conversation:
+        conv_id = args.conversation
+    else:
+        convs = sdk.call("listConversations", {"accountId": account_id})
+        convs = convs.get("conversations", [])
+        if not convs:
+            print("No conversations found. Create one first.")
+            sys.exit(1)
+
+        # Prefer conversation with >1 member
+        multi = [c for c in convs if c.get("members", 1) > 1]
+        if multi:
+            conv_id = multi[0]["id"]
+            conv_title = multi[0].get("title", "")
+            print(f"[bot] Auto-selected: {conv_title or conv_id[:12]}... ({multi[0]['members']} members)")
+        else:
+            conv_id = convs[0]["id"]
+            print(f"[bot] Only 1-member conversations found, using first")
+
+    # Register other members' names and get member count
+    conv_detail = sdk.call("getConversation", {
+        "accountId": account_id,
+        "conversationId": conv_id
+    })
+    member_count = conv_detail.get("memberCount", 2)
+    for member in conv_detail.get("members", []):
+        uri = member.get("uri", "")
+        if uri and uri not in known_senders:
+            known_senders[uri] = uri[-8:] if len(uri) > 8 else uri
+
+    print(f"[bot] Conversation: {conv_id} ({member_count} members)")
+    if use_sessions:
+        print(f"[bot] Session: {session_path(conv_id, args.session_dir)}")
+    else:
+        print(f"[bot] Sessions disabled (stateless mode)")
+    print(f"[bot] History: {args.history} messages as context")
+    print(f"[bot] Ack: {'disabled' if args.no_ack else 'enabled'}")
+    print(f"[bot] Waiting for messages... (Ctrl+C to stop)")
+    print()
+
+    # ── Main event loop ────────────────────────────────────────────────
+    try:
+        while True:
+            # Get next event from SDK (blocking with timeout)
+            event = sdk.get_notification(timeout=1.0)
+
+            if not event:
+                continue
+
+            method = event.get("method", "")
+            params = event.get("params", {})
+
+            if method == "onMessageReceived":
+                sender_uri = params.get("from", "")
+                body = params.get("body", "").strip()
+                msg_type = params.get("type", "")
+                conv_id_event = params.get("conversationId", "")
+
+                # Only process text messages in our target conversation
+                if msg_type != "text/plain" or not body or conv_id_event != conv_id:
+                    continue
+
+                # Skip our own messages
+                if sender_uri == our_uri:
+                    continue
+
+                # Skip ack messages
+                if body.startswith(ACK_PREFIX):
+                    continue
+
+                sender_name = format_sender(sender_uri, known_senders)
+                print(f"[bot] 📨 From {sender_name}: {body}")
+
+                if args.dry_run:
+                    print(f"[bot] (dry-run) Would send to pi")
+                    continue
+
+                # ── Send acknowledgment ───────────────────────────────
+                if not args.no_ack:
+                    try:
+                        sdk.call("sendMessage", {
+                            "accountId": account_id,
+                            "conversationId": conv_id,
+                            "body": f"{ACK_PREFIX}received, thinking..."
+                        })
+                        print(f"[bot] 📬 Ack sent")
+                    except Exception as e:
+                        print(f"[bot] ⚠️  Ack failed: {e}")
+
+                # ── Prepare prompt with conversation context ──────────
+                sfile = session_path(conv_id, args.session_dir) if use_sessions else None
+                first_message = sfile and is_new_session(sfile)
+
+                if first_message:
+                    # New session — load recent conversation history
+                    try:
+                        hist = sdk.call("loadMessages", {
+                            "accountId": account_id,
+                            "conversationId": conv_id,
+                            "count": args.history
+                        })
+                        conversation_history = list(reversed(hist.get("messages", [])))
+                    except Exception:
+                        conversation_history = None
+                    prompt = build_prompt(params, conversation_history, our_uri, known_senders, member_count)
+                    sp = system_prompt
+                elif use_sessions:
+                    # Continued session — pi already has context
+                    prompt = build_prompt(params, None, our_uri, known_senders, member_count)
+                    sp = None
+                else:
+                    # No session — include history every time
+                    try:
+                        hist = sdk.call("loadMessages", {
+                            "accountId": account_id,
+                            "conversationId": conv_id,
+                            "count": args.history
+                        })
+                        conversation_history = list(reversed(hist.get("messages", [])))
+                    except Exception:
+                        conversation_history = None
+                    prompt = build_prompt(params, conversation_history, our_uri, known_senders, member_count)
+                    sp = system_prompt
+
+                # ── Call pi ───────────────────────────────────────────
+                print(f"[bot] 🤖 Calling pi ({'new' if first_message else 'continued' if use_sessions else 'history'} session)...")
+                reply = call_pi(prompt, session_file=sfile,
+                                system_prompt=sp,
+                                extra_args=pi_extra)
+                reply_preview = reply[:100] + ("..." if len(reply) > 100 else "")
+                print(f"[bot] 🤖 Reply: {reply_preview}")
+
+                # ── Handle silent response ──────────────────────
+                if reply.strip() == SILENT_MARKER:
+                    print(f"[bot] 🤫 pi chose to stay silent")
+                    continue
+
+                # ── Send reply ────────────────────────────────────────
+                try:
+                    sdk.call("sendMessage", {
+                        "accountId": account_id,
+                        "conversationId": conv_id,
+                        "body": reply
+                    })
+                    print(f"[bot] ✅ Reply sent")
+                except Exception as e:
+                    print(f"[bot] ❌ Failed to send reply: {e}")
+
+    except KeyboardInterrupt:
+        print("\n[bot] Stopping...")
+        sdk.stop()
+        print("[bot] Stopped.")
+
+
+if __name__ == "__main__":
+    main()

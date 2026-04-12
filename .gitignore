@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+.venv/
+
+# Session data
+*.session
+sessions/
+
+# Editor / OS
+*.swp
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
