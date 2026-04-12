@@ -102,6 +102,26 @@ class AckManager:
         except Exception:
             pass  # Best-effort progress update
 
+    def mark_cancelled(self):
+        """Edit ack message to show status: cancelled."""
+        if self.no_ack or not self.ack_msg_id:
+            return
+
+        try:
+            self.sdk.call(
+                "editMessage",
+                {
+                    "accountId": self.account_id,
+                    "conversationId": self.conv_id,
+                    "body": build_ack_body(
+                        self.bot_id, "cancelled", model=self.seen_model
+                    ),
+                    "messageId": self.ack_msg_id,
+                },
+            )
+        except Exception:
+            pass
+
     def mark_done(self):
         """Edit ack message to show status: done."""
         if self.no_ack or not self.ack_msg_id:

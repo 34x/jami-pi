@@ -13,17 +13,21 @@ See: python3 bot.py --help
 import argparse
 import os
 import sys
+import threading
+
 
 from jami_client import JamiStdioClient
 from pi_client import call_pi
 from config import (
     ACK_PREFIX,
     SILENT_MARKER,
+    CANCELLED_MARKER,
     DEFAULT_SESSION_DIR,
     DEFAULT_HISTORY,
     load_system_prompt,
     session_path,
     is_new_session,
+    is_stop_command,
 )
 from formatting import build_prompt, format_sender
 from ack import AckManager
@@ -301,18 +305,60 @@ def main():
                     )
                     sp = system_prompt
 
-                # ── Call pi (with streaming progress) ───────────────────
+                # ── Call pi (threaded, cancellable) ──────────────────────
                 print(
                     f"[bot] 🤖 Calling pi ({'new' if first_message else 'continued' if use_sessions else 'history'} session)..."
                 )
 
-                reply = call_pi(
-                    prompt,
-                    session_file=sfile,
-                    system_prompt=sp,
-                    extra_args=pi_extra,
-                    on_progress=ack.on_progress,
-                )
+                cancel = threading.Event()
+                pi_result = [None]  # mutable container for thread return value
+
+                def _run_pi():
+                    pi_result[0] = call_pi(
+                        prompt,
+                        session_file=sfile,
+                        system_prompt=sp,
+                        extra_args=pi_extra,
+                        on_progress=ack.on_progress,
+                        cancel=cancel,
+                    )
+
+                pi_thread = threading.Thread(target=_run_pi, daemon=True)
+                pi_thread.start()
+
+                # Poll for stop commands while pi is running
+                while pi_thread.is_alive():
+                    evt = sdk.get_notification(timeout=0.5)
+                    if evt and evt.get("method") == "onMessageReceived":
+                        p = evt.get("params", {})
+                        stop_body = p.get("body", "").strip()
+                        stop_conv = p.get("conversationId", "")
+                        stop_sender = p.get("from", "")
+                        if (
+                            stop_conv == conv_id
+                            and stop_sender == sender_uri
+                            and is_stop_command(stop_body)
+                        ):
+                            print("[bot] 🛑 Stop command received, cancelling pi...")
+                            cancel.set()
+                            pi_thread.join(timeout=5)
+                            ack.mark_cancelled()
+                            break
+
+                if not cancel.is_set():
+                    pi_thread.join()
+
+                reply = pi_result[0]
+                if reply is None:
+                    # Thread didn't complete — shouldn't happen
+                    print("[bot] ⚠️  pi thread returned no result")
+                    ack.mark_done()
+                    continue
+
+                if reply == CANCELLED_MARKER:
+                    # Already handled above, but just in case
+                    continue
+
                 reply_preview = reply[:100] + ("..." if len(reply) > 100 else "")
                 print(f"[bot] 🤖 Reply: {reply_preview}")
 

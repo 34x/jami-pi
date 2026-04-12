@@ -48,6 +48,11 @@ Jami user ↔ jami-sdk (STDIO) ↔ bot.py ↔ pi
 | `onRegistrationChanged` | SDK → bot | Account status update |
 | `onConversationRequestReceived` | SDK → bot | Incoming group invite |
 | `onTrustRequestReceived` | SDK → bot | Incoming contact request |
+| `sendFile` | bot → SDK | Send file to conversation |
+| `downloadFile` | bot → SDK | Download file from conversation |
+| `cancelTransfer` | bot → SDK | Cancel file transfer |
+| `transferInfo` | bot → SDK | Get file transfer info |
+| `onDataTransferEvent` | SDK → bot | File transfer status/progress |
 
 ## Key Bot Features
 

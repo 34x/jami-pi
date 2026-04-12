@@ -8,11 +8,27 @@ ACK_PREFIX = "[bot"
 # Silent response marker — if pi returns exactly this, the bot stays silent
 SILENT_MARKER = "[SILENT]"
 
+# Stop words — single-word messages that cancel a running pi task
+STOP_WORDS = {"stop", "abort", "cancel", "kill"}
+
+# Marker returned when pi is cancelled by user
+CANCELLED_MARKER = "[CANCELLED]"
+
 # Default session directory
 DEFAULT_SESSION_DIR = "/tmp/jami-bot-sessions"
 
 # Default history size
 DEFAULT_HISTORY = 20
+
+
+def is_stop_command(body):
+    """Check if a message is a stop command.
+
+    Only matches if the entire message (after stripping) is a single stop word.
+    "stop doing that" does NOT match — only exact single-word matches.
+    """
+    word = body.strip().lower()
+    return word in STOP_WORDS and " " not in body.strip()
 
 
 def load_system_prompt(path=None):
