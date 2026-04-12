@@ -363,8 +363,9 @@ def call_pi(
 ):
     """Call pi in non-interactive JSON mode and return the assistant's reply text.
 
-    on_progress: optional callback(tokens, text, tools) called during streaming.
-                 tools is a list of (name, status) tuples for tool calls so far.
+    on_progress: optional callback(state) called during streaming.
+                 state is a dict with keys: tokens, text, tools, model.
+                 tools is a list of (name, status) tuples.
     """
     cmd = ["pi", "--print", "--mode", "json"]
 
@@ -392,7 +393,10 @@ def call_pi(
     token_count = 0
     text_so_far = ""
     last_progress = 0
+    model = ""
     tools = []  # list of (name, status) — status is "running" or "done"
+
+    state = {"tokens": 0, "text": "", "tools": [], "model": ""}
 
     for line in proc.stdout:
         try:
@@ -403,31 +407,48 @@ def call_pi(
         etype = event.get("type", "")
         evt = event.get("assistantMessageEvent", {})
 
+        # Capture model from message_start
+        if etype == "message_start":
+            msg = event.get("message", {})
+            if not model and msg.get("model"):
+                model = msg["model"]
+                state["model"] = model
+
         # Track streaming text deltas
         if evt.get("type") == "text_delta":
             text_so_far += evt.get("delta", "")
             token_count += 1
+            state["tokens"] = token_count
+            state["text"] = text_so_far
         elif evt.get("type") == "text_start":
             text_so_far = ""
             token_count = 0
+            state["tokens"] = 0
+            state["text"] = ""
 
         # Track tool calls
         elif etype == "tool_execution_start":
             tools.append((event.get("toolName", "?"), "running"))
+            state["tools"] = list(tools)
+            state["force_update"] = True
             if on_progress:
-                on_progress(token_count, text_so_far, tools)
+                on_progress(state)
         elif etype == "tool_execution_end":
             name = event.get("toolName", "?")
             for i in range(len(tools) - 1, -1, -1):
                 if tools[i][0] == name and tools[i][1] == "running":
                     tools[i] = (name, "done")
                     break
+            state["tools"] = list(tools)
+            state["force_update"] = True
             if on_progress:
-                on_progress(token_count, text_so_far, tools)
+                on_progress(state)
 
         # Report progress every ~50 tokens
         if on_progress and token_count > 0 and token_count - last_progress >= 50:
-            on_progress(token_count, text_so_far, tools)
+            state["tokens"] = token_count
+            state.pop("force_update", None)
+            on_progress(state)
             last_progress = token_count
 
         # Extract final reply from agent_end
@@ -446,11 +467,12 @@ def call_pi(
 
     # Final progress report
     if on_progress:
-        on_progress(token_count, text_so_far, tools)
+        state["tokens"] = token_count
+        state.pop("force_update", None)
+        on_progress(state)
 
     return reply or "[pi returned no text response]"
 
-    return reply or "[pi returned no text response]"
 
 
 # ---------------------------------------------------------------------------
@@ -761,44 +783,47 @@ def main():
                 )
 
                 last_edit_time = [0]  # throttle timestamp
-                tool_changed = [False]  # flag: tool event forces immediate update
 
-                def on_progress(tokens, text, tools=None):
-                    """Edit ack message with progress."""
+                def on_progress(state):
+                    """Edit ack message with streaming progress."""
                     import time as _time
 
-                    # Always update on tool events; throttle token-only updates to 10s
-                    is_tool_event = tool_changed[0]
-                    tool_changed[0] = False
+                    # Tool events force immediate update; token updates throttled to 10s
+                    force = state.pop("force_update", False)
                     now = _time.time()
-                    if not is_tool_event and now - last_edit_time[0] < 10:
+                    if not force and now - last_edit_time[0] < 10:
                         return
                     last_edit_time[0] = now
 
-                    if ack_msg_id:
-                        parts = []
-                        if tools:
-                            tool_strs = [
-                                n if s == "done" else f"... {n}"
-                                for n, s in tools
-                            ]
-                            parts.append("tools: " + " -> ".join(tool_strs))
-                        if tokens:
-                            parts.append(f"{tokens} tokens")
-                        body = ACK_PREFIX + (" | ".join(parts) or "thinking...")
-                        try:
-                            sdk.call(
-                                "editMessage",
-                                {
-                                    "accountId": account_id,
-                                    "conversationId": conv_id,
-                                    "body": body,
-                                    "messageId": ack_msg_id,
-                                },
-                            )
-                        except Exception:
-                            pass  # Best-effort progress update
+                    if not ack_msg_id:
+                        return
 
+                    tokens = state.get("tokens", 0)
+                    tools = state.get("tools", [])
+                    model = state.get("model", "")
+
+                    lines = []
+                    if model:
+                        lines.append(f"[model]: {model}")
+                    if tokens:
+                        lines.append(f"[generation]: {tokens} tokens")
+                    for name, status in tools:
+                        icon = "done" if status == "done" else "running"
+                        lines.append(f"[tool] {name} ({icon})")
+
+                    body = ACK_PREFIX + "\n".join(lines) if lines else f"{ACK_PREFIX}thinking..."
+                    try:
+                        sdk.call(
+                            "editMessage",
+                            {
+                                "accountId": account_id,
+                                "conversationId": conv_id,
+                                "body": body,
+                                "messageId": ack_msg_id,
+                            },
+                        )
+                    except Exception:
+                        pass  # Best-effort progress update
 
                 reply = call_pi(
                     prompt,
