@@ -358,8 +358,13 @@ def build_prompt(
 # ---------------------------------------------------------------------------
 
 
-def call_pi(prompt, session_file=None, system_prompt=None, extra_args=None):
-    """Call pi in non-interactive JSON mode and return the assistant's reply text."""
+def call_pi(
+    prompt, session_file=None, system_prompt=None, extra_args=None, on_progress=None
+):
+    """Call pi in non-interactive JSON mode and return the assistant's reply text.
+
+    on_progress: optional callback(tokens_so_far, text_so_far) called during streaming
+    """
     cmd = ["pi", "--print", "--mode", "json", "--no-tools"]
 
     if session_file:
@@ -376,29 +381,57 @@ def call_pi(prompt, session_file=None, system_prompt=None, extra_args=None):
     cmd.append(prompt)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except subprocess.TimeoutExpired:
-        return "[pi timed out after 120s]"
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+        )
     except FileNotFoundError:
         return "[pi not found — is it installed?]"
 
-    # Parse JSON stream — we want the last "agent_end" event's assistant text
     reply = None
-    for line in result.stdout.strip().splitlines():
+    token_count = 0
+    text_so_far = ""
+    last_progress = 0
+
+    for line in proc.stdout:
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if event.get("type") == "agent_end":
-            messages = event.get("messages", [])
-            for msg in reversed(messages):
+
+        etype = event.get("type", "")
+        evt = event.get("assistantMessageEvent", {})
+
+        # Track streaming text deltas
+        if evt.get("type") == "text_delta":
+            text_so_far += evt.get("delta", "")
+            token_count += 1
+        elif evt.get("type") == "text_start":
+            text_so_far = ""
+            token_count = 0
+
+        # Report progress every ~50 tokens or every 10 seconds
+        if on_progress and token_count > 0 and token_count - last_progress >= 50:
+            on_progress(token_count, text_so_far)
+            last_progress = token_count
+
+        # Extract final reply from agent_end
+        if etype == "agent_end":
+            for msg in reversed(event.get("messages", [])):
                 if msg.get("role") == "assistant":
-                    content = msg.get("content", [])
-                    for part in content:
+                    for part in msg.get("content", []):
                         if part.get("type") == "text":
                             reply = part["text"]
                             break
                     break
+
+    proc.wait()
+    if proc.returncode != 0 and not reply:
+        return f"[pi exited with code {proc.returncode}]"
+
+    # Final progress report
+    if on_progress:
+        on_progress(token_count, text_so_far)
+
     return reply or "[pi returned no text response]"
 
 
@@ -622,17 +655,28 @@ def main():
                     continue
 
                 # ── Send acknowledgment ───────────────────────────────
+                ack_msg_id = None  # used by on_progress closure below
                 if not args.no_ack:
                     try:
-                        sdk.call(
+                        result = sdk.call(
                             "sendMessage",
                             {
                                 "accountId": account_id,
                                 "conversationId": conv_id,
-                                "body": f"{ACK_PREFIX}received, thinking...",
+                                "body": f"{ACK_PREFIX}thinking...",
                             },
                         )
                         print("[bot] 📬 Ack sent")
+                        # Wait briefly for our own message notification to get the ID
+                        for _ in range(10):
+                            evt = sdk.get_notification(timeout=0.5)
+                            if evt and evt.get("method") == "onMessageReceived":
+                                p = evt.get("params", {})
+                                if p.get("from") == our_uri and p.get(
+                                    "body", ""
+                                ).startswith(ACK_PREFIX):
+                                    ack_msg_id = p.get("id")
+                                    break
                     except Exception as e:
                         print(f"[bot] ⚠️  Ack failed: {e}")
 
@@ -693,15 +737,41 @@ def main():
                     )
                     sp = system_prompt
 
-                # ── Call pi ───────────────────────────────────────────
+                # ── Call pi (with streaming progress) ───────────────────
                 print(
                     f"[bot] 🤖 Calling pi ({'new' if first_message else 'continued' if use_sessions else 'history'} session)..."
                 )
+
+                last_edit_time = [0]  # mutable closure hack
+
+                def on_progress(tokens, text):
+                    """Edit ack message with progress every 10 seconds."""
+                    import time as _time
+
+                    now = _time.time()
+                    if now - last_edit_time[0] < 10:
+                        return
+                    last_edit_time[0] = now
+                    if ack_msg_id:
+                        try:
+                            sdk.call(
+                                "editMessage",
+                                {
+                                    "accountId": account_id,
+                                    "conversationId": conv_id,
+                                    "body": f"{ACK_PREFIX}thinking... ({tokens} tokens)",
+                                    "messageId": ack_msg_id,
+                                },
+                            )
+                        except Exception:
+                            pass  # Best-effort progress update
+
                 reply = call_pi(
                     prompt,
                     session_file=sfile,
                     system_prompt=sp,
                     extra_args=pi_extra,
+                    on_progress=on_progress,
                 )
                 reply_preview = reply[:100] + ("..." if len(reply) > 100 else "")
                 print(f"[bot] 🤖 Reply: {reply_preview}")
