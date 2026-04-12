@@ -275,7 +275,7 @@ def _load_system_prompt():
 SILENT_MARKER = "__SILENT__"
 
 # Prefix for acknowledgment messages — used to filter them from pi context
-ACK_PREFIX = "💭 "
+ACK_PREFIX = "[bot] "
 
 
 def session_path(conv_id, session_dir):
@@ -472,7 +472,6 @@ def call_pi(
         on_progress(state)
 
     return reply or "[pi returned no text response]"
-
 
 
 # ---------------------------------------------------------------------------
@@ -783,6 +782,7 @@ def main():
                 )
 
                 last_edit_time = [0]  # throttle timestamp
+                seen_model = [""]  # mutable closure for model name
 
                 def on_progress(state):
                     """Edit ack message with streaming progress."""
@@ -801,17 +801,18 @@ def main():
                     tokens = state.get("tokens", 0)
                     tools = state.get("tools", [])
                     model = state.get("model", "")
-
-                    lines = []
                     if model:
-                        lines.append(f"[model]: {model}")
-                    if tokens:
-                        lines.append(f"[generation]: {tokens} tokens")
-                    for name, status in tools:
-                        icon = "done" if status == "done" else "running"
-                        lines.append(f"[tool] {name} ({icon})")
+                        seen_model[0] = model
 
-                    body = ACK_PREFIX + "\n".join(lines) if lines else f"{ACK_PREFIX}thinking..."
+                    lines = ["status: in progress"]
+                    if seen_model[0]:
+                        lines.append(f"model: {seen_model[0]}")
+                    if tokens:
+                        lines.append(f"tokens: {tokens}")
+                    for name, status in tools:
+                        lines.append(f"tool: {name} ({status})")
+
+                    body = ACK_PREFIX + "\n".join(lines)
                     try:
                         sdk.call(
                             "editMessage",
@@ -824,6 +825,27 @@ def main():
                         )
                     except Exception:
                         pass  # Best-effort progress update
+
+                # Mark ack message as done after reply is sent
+                def mark_done():
+                    if not ack_msg_id:
+                        return
+                    lines = ["status: done"]
+                    if seen_model[0]:
+                        lines.append(f"model: {seen_model[0]}")
+                    body = ACK_PREFIX + "\n".join(lines)
+                    try:
+                        sdk.call(
+                            "editMessage",
+                            {
+                                "accountId": account_id,
+                                "conversationId": conv_id,
+                                "body": body,
+                                "messageId": ack_msg_id,
+                            },
+                        )
+                    except Exception:
+                        pass
 
                 reply = call_pi(
                     prompt,
@@ -838,6 +860,7 @@ def main():
                 # ── Handle silent response ──────────────────────
                 if reply.strip() == SILENT_MARKER:
                     print("[bot] 🤫 pi chose to stay silent")
+                    mark_done()
                     continue
 
                 # ── Send reply ────────────────────────────────────────
@@ -851,6 +874,7 @@ def main():
                         },
                     )
                     print("[bot] ✅ Reply sent")
+                    mark_done()
                 except Exception as e:
                     print(f"[bot] ❌ Failed to send reply: {e}")
 
