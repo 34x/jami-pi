@@ -15,7 +15,7 @@ STOP_WORDS = {"stop", "abort", "cancel", "kill"}
 CANCELLED_MARKER = "[CANCELLED]"
 
 # Default session directory
-DEFAULT_SESSION_DIR = "/tmp/jami-bot-sessions"
+DEFAULT_SESSION_DIR = "/tmp/jami-pi-sessions"
 
 # Default history size
 DEFAULT_HISTORY = 20
