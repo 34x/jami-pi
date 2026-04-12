@@ -567,32 +567,19 @@ def main():
         greeting_text = args.greeting if args.greeting != "online" else "🟢 I'm online!"
 
     if greeting_text:
-        greeting_convs = []
-        if args.conversation:
-            # Only greet the specified conversation
-            greeting_convs = [args.conversation]
-        else:
-            # Greet all conversations the bot is a member of
-            all_convs = sdk.call("listConversations", {"accountId": account_id})
-            greeting_convs = [
-                c["id"]
-                for c in all_convs.get("conversations", [])
-                if c.get("members", 1) > 1
-            ]
-
-        for cid in greeting_convs:
-            try:
-                sdk.call(
-                    "sendMessage",
-                    {
-                        "accountId": account_id,
-                        "conversationId": cid,
-                        "body": greeting_text,
-                    },
-                )
-                print(f"[bot] 👋 Greeting sent to {cid[:12]}...")
-            except Exception as e:
-                print(f"[bot] ⚠️  Greeting failed for {cid[:12]}...: {e}")
+        # Only greet the conversation we're actually monitoring
+        try:
+            sdk.call(
+                "sendMessage",
+                {
+                    "accountId": account_id,
+                    "conversationId": conv_id,
+                    "body": greeting_text,
+                },
+            )
+            print("[bot] 👋 Greeting sent")
+        except Exception as e:
+            print(f"[bot] ⚠️  Greeting failed: {e}")
 
     print("[bot] Waiting for messages... (Ctrl+C to stop)")
     print()
