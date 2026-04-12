@@ -312,6 +312,13 @@ def main():
 
                 cancel = threading.Event()
                 pi_result = [None]  # mutable container for thread return value
+                partial_text = [""]  # track streaming text for cancel case
+
+                def _on_progress(state):
+                    """Wrap ack.on_progress to also capture partial text."""
+                    if state.get("text"):
+                        partial_text[0] = state["text"]
+                    ack.on_progress(state)
 
                 def _run_pi():
                     pi_result[0] = call_pi(
@@ -319,7 +326,7 @@ def main():
                         session_file=sfile,
                         system_prompt=sp,
                         extra_args=pi_extra,
-                        on_progress=ack.on_progress,
+                        on_progress=_on_progress,
                         cancel=cancel,
                     )
 
@@ -342,6 +349,19 @@ def main():
                             print("[bot] 🛑 Stop command received, cancelling pi...")
                             cancel.set()
                             pi_thread.join(timeout=5)
+                            # Send any partial text as a separate message
+                            if partial_text[0].strip():
+                                try:
+                                    sdk.call(
+                                        "sendMessage",
+                                        {
+                                            "accountId": account_id,
+                                            "conversationId": conv_id,
+                                            "body": partial_text[0] + "\n[cancelled]",
+                                        },
+                                    )
+                                except Exception:
+                                    pass
                             ack.mark_cancelled()
                             break
 
