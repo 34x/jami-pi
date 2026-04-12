@@ -3,7 +3,7 @@
 import os
 
 # Prefix for bot acknowledgment/status messages — used to filter them from pi context
-ACK_PREFIX = "[bot"
+ACK_PREFIX = "[bot:"
 
 # Silent response marker — if pi returns exactly this, the bot stays silent
 SILENT_MARKER = "[SILENT]"

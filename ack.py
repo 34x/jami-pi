@@ -5,31 +5,12 @@ import time
 from config import ACK_PREFIX
 
 
-def build_ack_body(bot_id, status, model="", tokens=0, tools=None):
-    """Build the body for a bot status/ack message.
-
-    Args:
-        bot_id: Short bot identifier (first 4 chars of Jami URI)
-        status: "in progress" or "done"
-        model: Model name (if known)
-        tokens: Token count so far
-        tools: List of (name, status) tuples for tool calls
-    """
-    lines = [f"[bot:{bot_id}]", f"status: {status}"]
-    if model:
-        lines.append(f"model: {model}")
-    if tokens:
-        lines.append(f"tokens: {tokens}")
-    if tools:
-        for name, tool_status in tools:
-            lines.append(f"tool: {name} ({tool_status})")
-    return "\n".join(lines)
-
-
 class AckManager:
     """Manages the ack/status message lifecycle for a single request.
 
-    Sends initial status, edits it with progress, then marks done.
+    Accumulates all metadata (model, tokens, tools) cumulatively —
+    once a field is known it is never dropped. The ack message always
+    reflects the full known state.
     """
 
     def __init__(self, sdk, account_id, conv_id, our_uri, no_ack=False):
@@ -39,13 +20,31 @@ class AckManager:
         self.bot_id = our_uri[:4]
         self.no_ack = no_ack
         self.ack_msg_id = None
-        self.seen_model = ""
         self._last_edit_time = 0
+
+        # Cumulative state — only grows, never shrinks
+        self.status = ""
+        self.model = ""
+        self.tokens = 0
+        self.tools = []  # list of (name, status) — appended on start, updated on end
+
+    def _format(self):
+        """Build the full cumulative ack message body."""
+        lines = [f"[bot:{self.bot_id}]", f"status: {self.status}"]
+        if self.model:
+            lines.append(f"model: {self.model}")
+        if self.tokens:
+            lines.append(f"tokens: {self.tokens}")
+        for name, tool_status in self.tools:
+            lines.append(f"tool: {name} ({tool_status})")
+        return "\n".join(lines)
 
     def send_initial(self):
         """Send the initial ack message."""
         if self.no_ack:
             return
+
+        self.status = "in progress"
 
         try:
             self.sdk.call(
@@ -53,7 +52,7 @@ class AckManager:
                 {
                     "accountId": self.account_id,
                     "conversationId": self.conv_id,
-                    "body": build_ack_body(self.bot_id, "in progress"),
+                    "body": self._format(),
                 },
             )
             # Wait briefly for our own message notification to get the ID
@@ -68,9 +67,25 @@ class AckManager:
             print(f"[bot] ⚠️  Ack failed: {e}")
 
     def on_progress(self, state):
-        """Edit ack message with streaming progress. Called by pi_client."""
+        """Edit ack message with streaming progress. Called by pi_client.
+
+        Merges new data into cumulative state, then re-sends the full message.
+        """
         if self.no_ack or not self.ack_msg_id:
             return
+
+        # Merge state — each field only upgrades, never downgrades
+        model = state.get("model", "")
+        if model:
+            self.model = model
+
+        tokens = state.get("tokens", 0)
+        if tokens:
+            self.tokens = tokens
+
+        tools = state.get("tools")
+        if tools:
+            self.tools = list(tools)  # pi_client already accumulates these
 
         # Tool events force immediate update; token updates throttled to 10s
         force = state.pop("force_update", False)
@@ -79,23 +94,13 @@ class AckManager:
             return
         self._last_edit_time = now
 
-        model = state.get("model", "")
-        if model:
-            self.seen_model = model
-
         try:
             self.sdk.call(
                 "editMessage",
                 {
                     "accountId": self.account_id,
                     "conversationId": self.conv_id,
-                    "body": build_ack_body(
-                        self.bot_id,
-                        "in progress",
-                        model=self.seen_model,
-                        tokens=state.get("tokens", 0),
-                        tools=state.get("tools", []),
-                    ),
+                    "body": self._format(),
                     "messageId": self.ack_msg_id,
                 },
             )
@@ -103,9 +108,11 @@ class AckManager:
             pass  # Best-effort progress update
 
     def mark_cancelled(self):
-        """Edit ack message to show status: cancelled."""
+        """Edit ack message to show status: cancelled (with all accumulated info)."""
         if self.no_ack or not self.ack_msg_id:
             return
+
+        self.status = "cancelled"
 
         try:
             self.sdk.call(
@@ -113,9 +120,7 @@ class AckManager:
                 {
                     "accountId": self.account_id,
                     "conversationId": self.conv_id,
-                    "body": build_ack_body(
-                        self.bot_id, "cancelled", model=self.seen_model
-                    ),
+                    "body": self._format(),
                     "messageId": self.ack_msg_id,
                 },
             )
@@ -123,9 +128,11 @@ class AckManager:
             pass
 
     def mark_done(self):
-        """Edit ack message to show status: done."""
+        """Edit ack message to show status: done (with all accumulated info)."""
         if self.no_ack or not self.ack_msg_id:
             return
+
+        self.status = "done"
 
         try:
             self.sdk.call(
@@ -133,7 +140,7 @@ class AckManager:
                 {
                     "accountId": self.account_id,
                     "conversationId": self.conv_id,
-                    "body": build_ack_body(self.bot_id, "done", model=self.seen_model),
+                    "body": self._format(),
                     "messageId": self.ack_msg_id,
                 },
             )
