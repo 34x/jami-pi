@@ -75,16 +75,6 @@ def should_respond(body, trigger, bot_names, parent_id="", our_message_ids=None)
     return False
 
 
-def load_system_prompt():
-    """Load the system prompt from the bundled system-prompt.md file."""
-    local = os.path.join(os.path.dirname(os.path.abspath(__file__)), "system-prompt.md")
-    if os.path.exists(local):
-        with open(local) as f:
-            return f.read().strip()
-
-    raise FileNotFoundError("system-prompt.md not found")
-
-
 def session_path(conv_id, session_dir):
     """Return the pi session file path for a conversation."""
     return os.path.join(session_dir, f"{conv_id}.json")

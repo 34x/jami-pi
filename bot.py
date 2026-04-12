@@ -23,7 +23,6 @@ from config import (
     TRIGGER_MODES,
     is_new_session,
     is_stop_command,
-    load_system_prompt,
     session_path,
     should_respond,
 )
@@ -82,7 +81,6 @@ def main():
     # Resolve jami-bridge binary path: --jami flag > JAMI_BRIDGE_PATH env > PATH lookup
     jami_binary = args.jami or os.environ.get("JAMI_BRIDGE_PATH") or "jami-bridge"
 
-    system_prompt = load_system_prompt()
     pi_extra = args.pi_args.split() if args.pi_args else None
     use_sessions = not args.no_session
     os.makedirs(args.session_dir, exist_ok=True)
@@ -299,7 +297,7 @@ def main():
                         known_senders,
                         member_count,
                     )
-                    sp = system_prompt
+                    sp = None
                 elif use_sessions:
                     # Continued session — pi already has context
                     prompt = build_prompt(
@@ -327,7 +325,7 @@ def main():
                         known_senders,
                         member_count,
                     )
-                    sp = system_prompt
+                    sp = None
 
                 # ── Call pi (threaded, cancellable) ──────────────────────
                 print(
