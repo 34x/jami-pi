@@ -14,7 +14,6 @@ import argparse
 import os
 import sys
 import threading
-import time
 
 from ack import AckManager
 from config import (
@@ -72,7 +71,6 @@ class Conversation:
         self.cancel = None  # threading.Event to cancel current pi call
         self.sender_uri = None  # who we're currently processing
         self.greeted = False  # True after greeting sent (avoid duplicates)
-        self.synced = False  # True after onConversationReady (ready for messages)
 
 
 def main():
@@ -288,45 +286,6 @@ def main():
         bot_log("[bot] Sessions disabled (stateless mode)")
     bot_log(f"[bot] History: {args.history} messages as context")
     bot_log(f"[bot] Ack: {'disabled' if args.no_ack else 'enabled'}")
-
-    # ── Wait for conversations to sync, then send online greeting ─────
-    # The daemon emits onConversationReady for each conversation once
-    # it's synced and ready to receive messages. We drain these events
-    # briefly so the greeting actually gets delivered.
-    bot_log("[bot] Waiting for conversations to sync...")
-    sync_deadline = time.time() + 10
-    while time.time() < sync_deadline and conversations:
-        remaining = sum(1 for c in conversations.values() if not c.synced)
-        if remaining == 0:
-            break
-        evt = sdk.get_notification(timeout=0.5)
-        if evt and evt.get("method") == "onConversationReady":
-            ready_conv_id = evt["params"].get("conversationId", "")
-            if ready_conv_id in conversations:
-                conversations[ready_conv_id].synced = True
-                bot_verbose(f"[bot] Synced: {_short_id(ready_conv_id)}")
-    # Mark any remaining as synced (cached/synced before we started listening)
-    for conv in conversations.values():
-        conv.synced = True
-
-    # Send "online" greeting to all conversations
-    if greeting_text:
-        greeted_count = 0
-        for conv_id, conv in conversations.items():
-            conv.greeted = True
-            try:
-                sdk.call(
-                    "sendMessage",
-                    {
-                        "accountId": account_id,
-                        "conversationId": conv_id,
-                        "body": greeting_text,
-                    },
-                )
-                greeted_count += 1
-            except Exception as e:
-                bot_warn(f"[bot] ⚠️  Greeting failed in {_short_id(conv_id)}: {e}")
-        bot_log(f"[bot] 👋 Online greeting sent to {greeted_count} conversation(s)")
 
     bot_log("[bot] Ready. (Ctrl+C to stop)")
     print()
