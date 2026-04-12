@@ -333,37 +333,58 @@ def main():
                 pi_thread = threading.Thread(target=_run_pi, daemon=True)
                 pi_thread.start()
 
-                # Poll for stop commands while pi is running
+                # Poll for stop commands / busy-reject other messages while pi runs
                 while pi_thread.is_alive():
                     evt = sdk.get_notification(timeout=0.5)
-                    if evt and evt.get("method") == "onMessageReceived":
-                        p = evt.get("params", {})
-                        stop_body = p.get("body", "").strip()
-                        stop_conv = p.get("conversationId", "")
-                        stop_sender = p.get("from", "")
-                        if (
-                            stop_conv == conv_id
-                            and stop_sender == sender_uri
-                            and is_stop_command(stop_body)
-                        ):
-                            print("[bot] 🛑 Stop command received, cancelling pi...")
-                            cancel.set()
-                            pi_thread.join(timeout=5)
-                            # Send any partial text as a separate message
-                            if partial_text[0].strip():
-                                try:
-                                    sdk.call(
-                                        "sendMessage",
-                                        {
-                                            "accountId": account_id,
-                                            "conversationId": conv_id,
-                                            "body": partial_text[0] + "\n[cancelled]",
-                                        },
-                                    )
-                                except Exception:
-                                    pass
-                            ack.mark_cancelled()
-                            break
+                    if not evt or evt.get("method") != "onMessageReceived":
+                        continue
+                    p = evt.get("params", {})
+                    evt_body = p.get("body", "").strip()
+                    evt_conv = p.get("conversationId", "")
+                    evt_sender = p.get("from", "")
+                    evt_type = p.get("type", "")
+
+                    # Only process text messages in our target conversation
+                    if evt_type != "text/plain" or evt_conv != conv_id:
+                        continue
+                    # Skip our own and ack messages
+                    if evt_sender == our_uri or evt_body.startswith(ACK_PREFIX):
+                        continue
+
+                    # Same sender: check for stop command
+                    if evt_sender == sender_uri and is_stop_command(evt_body):
+                        print("[bot] 🛑 Stop command received, cancelling pi...")
+                        cancel.set()
+                        pi_thread.join(timeout=5)
+                        if partial_text[0].strip():
+                            try:
+                                sdk.call(
+                                    "sendMessage",
+                                    {
+                                        "accountId": account_id,
+                                        "conversationId": conv_id,
+                                        "body": partial_text[0] + "\n[cancelled]",
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        ack.mark_cancelled()
+                        break
+
+                    # Any other message while busy: ask sender to retry later
+                    busy_sender = format_sender(evt_sender, known_senders)
+                    print(f"[bot] ⏳ Busy — message from {busy_sender} rejected")
+                    try:
+                        sdk.call(
+                            "sendMessage",
+                            {
+                                "accountId": account_id,
+                                "conversationId": conv_id,
+                                "body": "⏳ I'm still working on a request. Please resend your message later.",
+                            },
+                        )
+                    except Exception:
+                        pass
 
                 if not cancel.is_set():
                     pi_thread.join()
