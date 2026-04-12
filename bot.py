@@ -87,16 +87,6 @@ def main():
         "--list-accounts", action="store_true", help="List accounts and exit"
     )
     parser.add_argument(
-        "--alias",
-        default=None,
-        help="Set the bot's display name (profile alias) pushed to contacts.",
-    )
-    parser.add_argument(
-        "--register-name",
-        default=None,
-        help="Register a public Jami username (e.g. --register-name mybot). One-time action.",
-    )
-    parser.add_argument(
         "--history",
         type=int,
         default=DEFAULT_HISTORY,
@@ -209,51 +199,6 @@ def main():
     d = details.get("details") or {}
     our_uri = d.get("Account.username", "")
     our_alias = d.get("Account.alias", "bot")
-
-    # ── Register name (one-shot, exit after) ──────────────────────────────
-    if args.register_name:
-        bot_log(f"[bot] Registering name '{args.register_name}'...")
-        result = sdk.call(
-            "registerName",
-            {"accountId": account_id, "name": args.register_name},
-        )
-        bot_log(f"[bot] Registration result: {result}")
-        # Wait for the async result via onNameRegistrationEnded notification
-        bot_log(
-            "[bot] Waiting for registration result (this may take a few seconds)..."
-        )
-        deadline = __import__("time").time() + 15
-        while __import__("time").time() < deadline:
-            evt = sdk.get_notification(timeout=1)
-            if evt and evt.get("method") == "onNameRegistrationEnded":
-                state = evt.get("params", {}).get("state", -1)
-                reg_name = evt.get("params", {}).get("name", "")
-                state_names = {
-                    0: "success",
-                    1: "invalid name",
-                    2: "already taken",
-                    3: "error",
-                    4: "unsupported",
-                }
-                state_desc = state_names.get(state, f"unknown({state})")
-                if state == 0:
-                    print(f"✅ Name '{reg_name}' registered successfully!")
-                else:
-                    print(f"❌ Name '{reg_name}' registration failed: {state_desc}")
-                break
-        else:
-            print("❌ Registration timed out (15 seconds). Check logs for details.")
-        sdk.stop()
-        return
-
-    # ── Apply alias if specified ────────────────────────────────────────
-    if args.alias is not None and args.alias != our_alias:
-        bot_log(f"[bot] Setting alias: {our_alias} → {args.alias}")
-        sdk.call(
-            "updateProfile",
-            {"accountId": account_id, "displayName": args.alias},
-        )
-        our_alias = args.alias
 
     # ── Build trigger names from alias + URI fragment ────────────────
     bot_names = []
