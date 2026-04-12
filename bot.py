@@ -363,9 +363,10 @@ def call_pi(
 ):
     """Call pi in non-interactive JSON mode and return the assistant's reply text.
 
-    on_progress: optional callback(tokens_so_far, text_so_far) called during streaming
+    on_progress: optional callback(tokens, text, tools) called during streaming.
+                 tools is a list of (name, status) tuples for tool calls so far.
     """
-    cmd = ["pi", "--print", "--mode", "json", "--no-tools"]
+    cmd = ["pi", "--print", "--mode", "json"]
 
     if session_file:
         cmd.extend(["--session", session_file])
@@ -391,6 +392,7 @@ def call_pi(
     token_count = 0
     text_so_far = ""
     last_progress = 0
+    tools = []  # list of (name, status) — status is "running" or "done"
 
     for line in proc.stdout:
         try:
@@ -409,9 +411,23 @@ def call_pi(
             text_so_far = ""
             token_count = 0
 
-        # Report progress every ~50 tokens or every 10 seconds
+        # Track tool calls
+        elif etype == "tool_execution_start":
+            tools.append((event.get("toolName", "?"), "running"))
+            if on_progress:
+                on_progress(token_count, text_so_far, tools)
+        elif etype == "tool_execution_end":
+            name = event.get("toolName", "?")
+            for i in range(len(tools) - 1, -1, -1):
+                if tools[i][0] == name and tools[i][1] == "running":
+                    tools[i] = (name, "done")
+                    break
+            if on_progress:
+                on_progress(token_count, text_so_far, tools)
+
+        # Report progress every ~50 tokens
         if on_progress and token_count > 0 and token_count - last_progress >= 50:
-            on_progress(token_count, text_so_far)
+            on_progress(token_count, text_so_far, tools)
             last_progress = token_count
 
         # Extract final reply from agent_end
@@ -430,7 +446,9 @@ def call_pi(
 
     # Final progress report
     if on_progress:
-        on_progress(token_count, text_so_far)
+        on_progress(token_count, text_so_far, tools)
+
+    return reply or "[pi returned no text response]"
 
     return reply or "[pi returned no text response]"
 
@@ -742,29 +760,45 @@ def main():
                     f"[bot] 🤖 Calling pi ({'new' if first_message else 'continued' if use_sessions else 'history'} session)..."
                 )
 
-                last_edit_time = [0]  # mutable closure hack
+                last_edit_time = [0]  # throttle timestamp
+                tool_changed = [False]  # flag: tool event forces immediate update
 
-                def on_progress(tokens, text):
-                    """Edit ack message with progress every 10 seconds."""
+                def on_progress(tokens, text, tools=None):
+                    """Edit ack message with progress."""
                     import time as _time
 
+                    # Always update on tool events; throttle token-only updates to 10s
+                    is_tool_event = tool_changed[0]
+                    tool_changed[0] = False
                     now = _time.time()
-                    if now - last_edit_time[0] < 10:
+                    if not is_tool_event and now - last_edit_time[0] < 10:
                         return
                     last_edit_time[0] = now
+
                     if ack_msg_id:
+                        parts = []
+                        if tools:
+                            tool_strs = [
+                                n if s == "done" else f"... {n}"
+                                for n, s in tools
+                            ]
+                            parts.append("tools: " + " -> ".join(tool_strs))
+                        if tokens:
+                            parts.append(f"{tokens} tokens")
+                        body = ACK_PREFIX + (" | ".join(parts) or "thinking...")
                         try:
                             sdk.call(
                                 "editMessage",
                                 {
                                     "accountId": account_id,
                                     "conversationId": conv_id,
-                                    "body": f"{ACK_PREFIX}thinking... ({tokens} tokens)",
+                                    "body": body,
                                     "messageId": ack_msg_id,
                                 },
                             )
                         except Exception:
                             pass  # Best-effort progress update
+
 
                 reply = call_pi(
                     prompt,
