@@ -209,8 +209,8 @@ def main():
     if args.alias is not None and args.alias != our_alias:
         bot_log(f"[bot] Setting alias: {our_alias} → {args.alias}")
         sdk.call(
-            "setAccountDetails",
-            {"accountId": account_id, "details": {"Account.alias": args.alias}},
+            "updateProfile",
+            {"accountId": account_id, "displayName": args.alias},
         )
         our_alias = args.alias
 
