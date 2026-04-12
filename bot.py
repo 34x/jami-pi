@@ -275,7 +275,7 @@ def _load_system_prompt():
 SILENT_MARKER = "__SILENT__"
 
 # Prefix for acknowledgment messages — used to filter them from pi context
-ACK_PREFIX = "[bot] "
+ACK_PREFIX = "[bot"
 
 
 def session_path(conv_id, session_dir):
@@ -702,7 +702,7 @@ def main():
                             {
                                 "accountId": account_id,
                                 "conversationId": conv_id,
-                                "body": f"{ACK_PREFIX}thinking...",
+                                "body": f"[bot:{our_uri[:4]}]\nstatus: in progress",
                             },
                         )
                         print("[bot] 📬 Ack sent")
@@ -804,7 +804,8 @@ def main():
                     if model:
                         seen_model[0] = model
 
-                    lines = ["status: in progress"]
+                    bot_id = our_uri[:4]
+                    lines = [f"[bot:{bot_id}]", "status: in progress"]
                     if seen_model[0]:
                         lines.append(f"model: {seen_model[0]}")
                     if tokens:
@@ -830,7 +831,8 @@ def main():
                 def mark_done():
                     if not ack_msg_id:
                         return
-                    lines = ["status: done"]
+                    bot_id = our_uri[:4]
+                    lines = [f"[bot:{bot_id}]", "status: done"]
                     if seen_model[0]:
                         lines.append(f"model: {seen_model[0]}")
                     body = ACK_PREFIX + "\n".join(lines)
