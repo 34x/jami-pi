@@ -297,13 +297,11 @@ def main():
                         known_senders,
                         member_count,
                     )
-                    sp = None
                 elif use_sessions:
                     # Continued session — pi already has context
                     prompt = build_prompt(
                         params, None, our_uri, known_senders, member_count
                     )
-                    sp = None
                 else:
                     # No session — include history every time
                     try:
@@ -325,7 +323,6 @@ def main():
                         known_senders,
                         member_count,
                     )
-                    sp = None
 
                 # ── Call pi (threaded, cancellable) ──────────────────────
                 print(
@@ -346,7 +343,6 @@ def main():
                     pi_result[0] = call_pi(
                         prompt,
                         session_file=sfile,
-                        system_prompt=sp,
                         extra_args=pi_extra,
                         on_progress=_on_progress,
                         cancel=cancel,

@@ -36,7 +36,6 @@ def _tool_label(name, args):
 def call_pi(
     prompt,
     session_file=None,
-    system_prompt=None,
     extra_args=None,
     on_progress=None,
     cancel=None,
@@ -56,9 +55,6 @@ def call_pi(
         cmd.extend(["--session", session_file])
     else:
         cmd.append("--no-session")
-
-    if system_prompt:
-        cmd.extend(["--system-prompt", system_prompt])
 
     if extra_args:
         cmd.extend(extra_args)

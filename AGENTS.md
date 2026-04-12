@@ -33,12 +33,12 @@ Jami user ↔ jami-bridge (STDIO) ↔ bot.py ↔ pi
 | File | Purpose |
 |------|---------|
 | `bot.py` | Main bot script — CLI args, event loop, message routing |
-| `config.py` | Constants, helpers, trigger logic, system prompt loader |
+| `config.py` | Constants, helpers, trigger logic |
 | `jami_client.py` | JSON-RPC 2.0 stdio client for jami-bridge |
 | `pi_client.py` | pi CLI interface — call pi in JSON mode, stream progress |
 | `formatting.py` | Message formatting — sender names, history, prompt building |
 | `ack.py` | Ack/status message management — editable status messages in Jami |
-| `system-prompt.md` | System prompt for pi (bundled, not configurable via CLI) |
+
 
 ## JSON-RPC Methods Used
 
