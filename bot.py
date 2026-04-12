@@ -14,6 +14,7 @@ Options:
     --no-session       Don't use pi sessions (stateless, each call is blank slate)
     --no-ack           Don't send "received" acknowledgment messages
     --greeting TEXT    Send greeting on startup (default: "online", "false" to disable, or custom text)
+    --model NAME       Model for pi (e.g. sonnet, gpt-4o, haiku)
     --pi-args ARGS     Extra arguments passed to pi
     --dry-run          Don't actually call pi, just print what would be sent
     --help             Show this help
@@ -358,9 +359,12 @@ def build_prompt(
 # ---------------------------------------------------------------------------
 
 
-def call_pi(prompt, session_file=None, system_prompt=None, extra_args=None):
+def call_pi(prompt, session_file=None, system_prompt=None, model=None, extra_args=None):
     """Call pi in non-interactive JSON mode and return the assistant's reply text."""
     cmd = ["pi", "--print", "--mode", "json", "--no-tools"]
+
+    if model:
+        cmd.extend(["--model", model])
 
     if session_file:
         cmd.extend(["--session", session_file])
@@ -447,6 +451,9 @@ def main():
         "--greeting",
         default="online",
         help='Send a greeting on startup to all conversations: "online" (default), custom text, or "false" to disable',
+    )
+    parser.add_argument(
+        "--model", default=None, help="Model for pi (e.g. sonnet, gpt-4o, haiku)"
     )
     parser.add_argument("--pi-args", default="", help="Extra pi args (space-separated)")
     parser.add_argument("--dry-run", action="store_true", help="Don't call pi")
@@ -698,7 +705,11 @@ def main():
                     f"[bot] 🤖 Calling pi ({'new' if first_message else 'continued' if use_sessions else 'history'} session)..."
                 )
                 reply = call_pi(
-                    prompt, session_file=sfile, system_prompt=sp, extra_args=pi_extra
+                    prompt,
+                    session_file=sfile,
+                    system_prompt=sp,
+                    model=args.model,
+                    extra_args=pi_extra,
                 )
                 reply_preview = reply[:100] + ("..." if len(reply) > 100 else "")
                 print(f"[bot] 🤖 Reply: {reply_preview}")
