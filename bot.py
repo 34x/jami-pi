@@ -87,6 +87,11 @@ def main():
         "--list-accounts", action="store_true", help="List accounts and exit"
     )
     parser.add_argument(
+        "--alias",
+        default=None,
+        help="Set the bot's display name (alias) in Jami. Also used as trigger name in --trigger mention/smart mode.",
+    )
+    parser.add_argument(
         "--history",
         type=int,
         default=DEFAULT_HISTORY,
@@ -199,6 +204,15 @@ def main():
     d = details.get("details") or {}
     our_uri = d.get("Account.username", "")
     our_alias = d.get("Account.alias", "bot")
+
+    # ── Apply alias if specified ────────────────────────────────────────
+    if args.alias is not None and args.alias != our_alias:
+        bot_log(f"[bot] Setting alias: {our_alias} → {args.alias}")
+        sdk.call(
+            "setAccountDetails",
+            {"accountId": account_id, "details": {"Account.alias": args.alias}},
+        )
+        our_alias = args.alias
 
     # ── Build trigger names from alias + URI fragment ────────────────
     bot_names = []
