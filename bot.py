@@ -15,25 +15,24 @@ import os
 import sys
 import threading
 
-
-from jami_client import JamiStdioClient  # noqa: F821
-from pi_client import call_pi  # noqa: F821
-from config import (  # noqa: F821
+from ack import AckManager
+from config import (
     ACK_PREFIX,
-    SILENT_MARKER,
     CANCELLED_MARKER,
-    DEFAULT_SESSION_DIR,
     DEFAULT_HISTORY,
+    DEFAULT_SESSION_DIR,
+    SILENT_MARKER,
     TRIGGER_ALL,
     TRIGGER_MODES,
-    load_system_prompt,
-    session_path,
     is_new_session,
     is_stop_command,
+    load_system_prompt,
+    session_path,
     should_respond,
 )
-from formatting import build_prompt, format_sender  # noqa: F821
-from ack import AckManager  # noqa: F821
+from formatting import build_prompt, format_sender
+from jami_client import JamiStdioClient
+from pi_client import call_pi
 
 
 def main():

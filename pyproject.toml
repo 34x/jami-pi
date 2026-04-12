@@ -6,6 +6,3 @@ requires-python = ">=3.9"
 
 [tool.ruff]
 src = ["."]
-
-[tool.ruff.lint]
-ignore = ["F821"]  # ruff can't resolve local module imports from parent dir
