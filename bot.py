@@ -289,18 +289,17 @@ def main():
     # Send greeting to all conversations
     if greeting_text:
         for conv_id, conv in conversations.items():
-            if conv.member_count > 1:
-                try:
-                    sdk.call(
-                        "sendMessage",
-                        {
-                            "accountId": account_id,
-                            "conversationId": conv_id,
-                            "body": greeting_text,
-                        },
-                    )
-                except Exception as e:
-                    bot_warn(f"[bot] ⚠️  Greeting failed in {conv_id}: {e}")
+            try:
+                sdk.call(
+                    "sendMessage",
+                    {
+                        "accountId": account_id,
+                        "conversationId": conv_id,
+                        "body": greeting_text,
+                    },
+                )
+            except Exception as e:
+                bot_warn(f"[bot] ⚠️  Greeting failed in {_short_id(conv_id)}: {e}")
         bot_log("[bot] 👋 Greeting sent")
 
     bot_log("[bot] Waiting for messages... (Ctrl+C to stop)")
@@ -481,6 +480,9 @@ def main():
                                     "conversationId": ready_conv_id,
                                     "body": greeting_text,
                                 },
+                            )
+                            bot_log(
+                                f"[bot] 👋 Greeting sent to {_short_id(ready_conv_id)}"
                             )
                         except Exception as e:
                             bot_warn(f"[bot] ⚠️  Greeting failed: {e}")
