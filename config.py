@@ -6,7 +6,7 @@ import os
 ACK_PREFIX = "[bot:"
 
 # Silent response marker — if pi returns exactly this, the bot stays silent
-SILENT_MARKER = "[SILENT]"
+SILENT_MARKER = "__SILENT__"
 
 # Stop words — single-word messages that cancel a running pi task
 STOP_WORDS = {"stop", "abort", "cancel", "kill"}
