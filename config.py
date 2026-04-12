@@ -20,6 +20,12 @@ DEFAULT_SESSION_DIR = "/tmp/jami-bot-sessions"
 # Default history size
 DEFAULT_HISTORY = 20
 
+# Trigger modes
+TRIGGER_ALL = "all"  # respond to every message (1:1 default)
+TRIGGER_MENTION = "mention"  # respond only if bot name mentioned or reply to bot
+TRIGGER_SMART = "smart"  # mention/reply check first, then LLM decides
+TRIGGER_MODES = {TRIGGER_ALL, TRIGGER_MENTION, TRIGGER_SMART}
+
 
 def is_stop_command(body):
     """Check if a message is a stop command.
@@ -29,6 +35,44 @@ def is_stop_command(body):
     """
     word = body.strip().lower()
     return word in STOP_WORDS and " " not in body.strip()
+
+
+def should_respond(body, trigger, bot_names, parent_id="", our_message_ids=None):
+    """Decide whether the bot should respond to a message.
+
+    Args:
+        body: message text
+        trigger: TRIGGER_ALL, TRIGGER_MENTION, or TRIGGER_SMART
+        bot_names: list of lowercase strings to match (alias, uri fragment, etc.)
+        parent_id: message's reply-to parent ID (empty if not a reply)
+        our_message_ids: set of message IDs sent by the bot (for reply detection)
+
+    Returns:
+        True if the bot should process the message,
+        "smart" if trigger=smart and mention detected (needs LLM check),
+        False if the bot should ignore the message entirely.
+    """
+    if trigger == TRIGGER_ALL:
+        return True
+
+    # Mention check: does the message text contain any of our names?
+    body_lower = body.lower()
+    mentioned = any(name in body_lower for name in bot_names if name)
+
+    # Reply check: is this a reply to one of the bot's messages?
+    replying_to_bot = False
+    if parent_id and our_message_ids is not None:
+        replying_to_bot = parent_id in our_message_ids
+
+    if trigger == TRIGGER_MENTION:
+        return mentioned or replying_to_bot
+
+    if trigger == TRIGGER_SMART:
+        if mentioned or replying_to_bot:
+            return "smart"  # needs further LLM relevance check
+        return False
+
+    return False
 
 
 def load_system_prompt(path=None):

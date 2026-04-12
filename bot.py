@@ -24,6 +24,8 @@ from config import (
     CANCELLED_MARKER,
     DEFAULT_SESSION_DIR,
     DEFAULT_HISTORY,
+    TRIGGER_ALL,
+    TRIGGER_MODES,
     load_system_prompt,
     session_path,
     is_new_session,
@@ -75,6 +77,18 @@ def main():
         help='Send a greeting on startup: "online" (default), custom text, or "false" to disable',
     )
     parser.add_argument("--pi-args", default="", help="Extra pi args (space-separated)")
+    parser.add_argument(
+        "--trigger",
+        default=TRIGGER_ALL,
+        choices=sorted(TRIGGER_MODES),
+        help="When to respond: all (every msg), mention (bot name/reply), smart (mention+LLM check)",
+    )
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Extra trigger name (can be used multiple times)",
+        action="append",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Don't call pi")
     args = parser.parse_args()
 
@@ -142,9 +156,26 @@ def main():
     # Register our own name in the known senders
     known_senders[our_uri] = our_alias or "bot"
 
+    # ── Build trigger names from alias + extra --name args ────────────
+    bot_names = []
+    if our_alias:
+        bot_names.append(our_alias.lower())
+    # Add short URI fragment (last 8 chars) as a fallback name
+    uri_short = our_uri.rsplit(":", 1)[-1][-8:] if ":" in our_uri else our_uri[-8:]
+    if uri_short and uri_short not in bot_names:
+        bot_names.append(uri_short.lower())
+    if args.name:
+        for n in args.name:
+            if n.lower() not in bot_names:
+                bot_names.append(n.lower())
+    # Track message IDs we send, for reply-to-bot detection
+    our_message_ids = set()
+
+    trigger = args.trigger
     print(f"[bot] Account: {account_id}")
     print(f"[bot] Our URI: {our_uri}")
     print(f"[bot] Our alias: {our_alias}")
+    print(f"[bot] Trigger: {trigger} (names: {bot_names})")
 
     # ── Discover conversation ─────────────────────────────────────────
     if args.conversation:
@@ -224,21 +255,36 @@ def main():
                 body = params.get("body", "").strip()
                 msg_type = params.get("type", "")
                 conv_id_event = params.get("conversationId", "")
+                msg_id = params.get("id", "")
+                parent_id = params.get("parentId", "")
 
                 # Only process text messages in our target conversation
                 if msg_type != "text/plain" or not body or conv_id_event != conv_id:
                     continue
 
-                # Skip our own messages
+                # Skip our own messages — but track message IDs for reply detection
                 if sender_uri == our_uri:
+                    if msg_id:
+                        our_message_ids.add(msg_id)
                     continue
 
                 # Skip ack/status messages
                 if body.startswith(ACK_PREFIX):
                     continue
 
-                sender_name = format_sender(sender_uri, known_senders)
-                print(f"[bot] 📨 From {sender_name}: {body}")
+                # ── Trigger gate ────────────────────────────────────
+                if trigger != TRIGGER_ALL:
+                    mentioned = any(n in body.lower() for n in bot_names if n)
+                    replying_to_bot = parent_id and parent_id in our_message_ids
+                    if not (mentioned or replying_to_bot):
+                        print(
+                            f"[bot] 🔄 Skipping (trigger={trigger}, no mention/reply)"
+                        )
+                        continue
+                    # smart mode: further LLM relevance check (future)
+                    # if trigger == TRIGGER_SMART:
+                    #     ... lightweight pi call ...
+                # (Future: add a lightweight pi call here to check relevance)
 
                 if args.dry_run:
                     print("[bot] (dry-run) Would send to pi")
