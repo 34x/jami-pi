@@ -5,6 +5,111 @@ A community-made bridge between Jami and pi — **not an official project of eit
 - Jami: https://jami.net
 - pi: https://pi.dev
 
+## Quick Start
+
+### 1. Install jami-bridge
+
+Download the latest distribution tarball from
+[jami-bridge releases](https://github.com/34x/jami-bridge/releases) and extract it:
+
+```bash
+tar xzf jami-bridge-dist.tar.gz
+cd jami-bridge-dist
+ls
+# jami-bridge  lib/
+```
+
+The `jami-bridge` binary expects `./lib/` next to it (RPATH is `$ORIGIN/lib`).
+No extra packages needed on Fedora 43+ — everything is bundled.
+
+### 2. Install pi
+
+Follow the instructions at [pi.dev](https://pi.dev) to install the pi CLI and
+configure your LLM provider.
+
+### 3. Run the bot
+
+Point `--jami` at the bridge binary you just extracted:
+
+```bash
+python3 bot.py --jami /path/to/jami-bridge-dist/jami-bridge
+```
+
+On first run with a fresh profile the bot creates a new Jami account and
+prints its identity:
+
+```
+[bot] Account: <account-id>
+[bot] Our URI: jami://<your-bot-uri>
+[bot] Our alias: bot
+[bot] Waiting for messages...
+```
+
+Copy the **Our URI** value — this is how you add the bot to a group.
+
+Alternatively, you can add the bridge binary to your PATH or set the
+`JAMI_BRIDGE_PATH` environment variable:
+
+```bash
+export JAMI_BRIDGE_PATH=/path/to/jami-bridge-dist/jami-bridge
+python3 bot.py
+```
+
+### 4. Add the bot to a Jami group
+
+1. Open the **Jami** app on your phone or desktop
+2. Open the group conversation you want the bot in (or create a new one)
+3. Open the conversation settings → **Add member**
+4. Enter the bot's URI (the value from `Our URI` above, e.g. `jami://...`)
+5. The bot needs to accept the invite. The bridge supports `--auto-accept`
+   and `--auto-accept-from` flags for this. Since `bot.py` launches the bridge
+   with `--stdio`, you need to pass bridge flags by setting the binary path
+   to a wrapper script, or start the bridge separately with `--auto-accept`
+   first, then restart with the bot.
+
+**Option A — Quick setup (bot auto-accepts everything):**
+
+Create a small wrapper script and point `--jami` at it:
+
+```bash
+cat > /tmp/jami-bridge-auto <<'EOF'
+#!/bin/bash
+exec /path/to/jami-bridge-dist/jami-bridge --auto-accept "$@"
+EOF
+chmod +x /tmp/jami-bridge-auto
+
+python3 bot.py --jami /tmp/jami-bridge-auto
+```
+
+**Option B — Accept invites with the standalone bridge, then run the bot:**
+
+```bash
+# Start the bridge in HTTP mode with auto-accept
+/path/to/jami-bridge-dist/jami-bridge --auto-accept --port 8090
+
+# (From another terminal) Add the bot to your group in the Jami app now.
+# The bridge will accept the invite automatically.
+# You should see: [jami-bridge] Accepted conversation request from ...
+
+# Once accepted, stop the bridge (Ctrl+\ or SIGTERM) and start the bot:
+python3 bot.py --jami /path/to/jami-bridge-dist/jami-bridge
+```
+
+> **Tip:** For production use, use `--auto-accept-from <your-uri>` to only accept
+> invites from you, or `--reject-unknown` to block all new invites.
+
+### 5. Chat with the bot
+
+Send a message in the group — the bot will respond:
+
+```
+📨 From alice: What is 2+2?
+🤖 Reply: 2 + 2 = 4
+✅ Reply sent
+```
+
+---
+
 ## How It Works
 
 ```
@@ -17,11 +122,13 @@ pushed from bridge to bot in real-time — no polling needed.
 
 ## Requirements
 
-- **[jami-bridge](https://jami.net)** binary (in PATH, set `JAMI_BRIDGE_PATH` env, or specify with `--jami`)
+- **[jami-bridge](https://github.com/34x/jami-bridge)** binary ([download from releases](https://github.com/34x/jami-bridge/releases), in PATH, set `JAMI_BRIDGE_PATH` env, or specify with `--jami`)
 - **[pi](https://pi.dev)** CLI installed and configured
 - **python3** ≥3.9 (stdlib only — no extra packages). **Linux/macOS required** (uses `fcntl`).
 
 This is an **unofficial community project**. It is not affiliated with, endorsed by, or officially connected to the Jami or pi projects.
+
+Built with [pi.dev](https://pi.dev) and **GLM-5.1**.
 
 ## Usage
 
