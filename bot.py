@@ -70,6 +70,7 @@ class Conversation:
         self.busy = False  # True while pi is processing a request
         self.cancel = None  # threading.Event to cancel current pi call
         self.sender_uri = None  # who we're currently processing
+        self.greeted = False  # True after greeting sent (avoid duplicates)
 
 
 def main():
@@ -286,23 +287,7 @@ def main():
     bot_log(f"[bot] History: {args.history} messages as context")
     bot_log(f"[bot] Ack: {'disabled' if args.no_ack else 'enabled'}")
 
-    # Send greeting to all conversations
-    if greeting_text:
-        for conv_id, conv in conversations.items():
-            try:
-                sdk.call(
-                    "sendMessage",
-                    {
-                        "accountId": account_id,
-                        "conversationId": conv_id,
-                        "body": greeting_text,
-                    },
-                )
-            except Exception as e:
-                bot_warn(f"[bot] ⚠️  Greeting failed in {_short_id(conv_id)}: {e}")
-        bot_log("[bot] 👋 Greeting sent")
-
-    bot_log("[bot] Waiting for messages... (Ctrl+C to stop)")
+    bot_log("[bot] Waiting for conversations to sync and messages... (Ctrl+C to stop)")
     print()
 
     # ── Pi call helpers ──────────────────────────────────────────────
@@ -465,27 +450,29 @@ def main():
             # ── Handle conversation ready (new/accepted conversation) ───
             if method == "onConversationReady":
                 ready_conv_id = params.get("conversationId", "")
-                if ready_conv_id and ready_conv_id not in conversations:
+                if not ready_conv_id:
+                    continue
+                # Register if new
+                if ready_conv_id not in conversations:
                     conv = _register_conversation(ready_conv_id)
                     bot_log(
                         f"[bot] 📨 New conversation ready: {_short_id(ready_conv_id)}... ({conv.member_count} members)"
                     )
-                    # Send greeting to the new conversation
-                    if greeting_text:
-                        try:
-                            sdk.call(
-                                "sendMessage",
-                                {
-                                    "accountId": account_id,
-                                    "conversationId": ready_conv_id,
-                                    "body": greeting_text,
-                                },
-                            )
-                            bot_log(
-                                f"[bot] 👋 Greeting sent to {_short_id(ready_conv_id)}"
-                            )
-                        except Exception as e:
-                            bot_warn(f"[bot] ⚠️  Greeting failed: {e}")
+                # Send greeting (once per conversation, when it's actually ready)
+                if greeting_text and not conversations[ready_conv_id].greeted:
+                    conversations[ready_conv_id].greeted = True
+                    try:
+                        sdk.call(
+                            "sendMessage",
+                            {
+                                "accountId": account_id,
+                                "conversationId": ready_conv_id,
+                                "body": greeting_text,
+                            },
+                        )
+                        bot_log(f"[bot] 👋 Greeting sent to {_short_id(ready_conv_id)}")
+                    except Exception as e:
+                        bot_warn(f"[bot] ⚠️  Greeting failed: {e}")
                 continue
 
             # ── Handle member joins/leaves ───────────────────────────────
