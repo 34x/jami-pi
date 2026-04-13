@@ -4,16 +4,8 @@ import json
 import queue
 import subprocess
 import threading
-import time
 
 from config import CANCELLED_MARKER
-
-# Default stall timeout: kill pi if it produces no output for this many seconds.
-# This prevents the bot from hanging forever when pi waits for user
-# confirmation (e.g. guardrails permissionGate prompts on dangerous
-# commands like sudo, rm -rf, etc.) which can't be answered in
-# non-interactive --print mode.
-DEFAULT_STALL_TIMEOUT = 60
 
 
 def _tool_label(name, args):
@@ -46,7 +38,6 @@ def call_pi(
     extra_args=None,
     on_progress=None,
     cancel=None,
-    stall_timeout=DEFAULT_STALL_TIMEOUT,
 ):
     """Call pi in non-interactive JSON mode and return the assistant's reply text.
 
@@ -56,10 +47,6 @@ def call_pi(
                  Set state["force_update"] = True to bypass throttle.
     cancel: optional threading.Event — set it to terminate pi immediately.
             Returns CANCELLED_MARKER if cancelled.
-    stall_timeout: seconds with no output before killing pi (default: 60).
-                   Prevents hangs when pi waits for user confirmation
-                   (e.g. guardrails permissionGate) that can't be answered
-                   in non-interactive mode. Set to 0 to disable.
     """
     cmd = ["pi", "--print", "--mode", "json"]
 
@@ -178,8 +165,7 @@ def call_pi(
 
         return False
 
-    # ── Main loop: drain lines from queue, check cancel/stall ──────
-    last_output_time = time.monotonic()
+    # ── Main loop: drain lines from queue, check cancel ────────────
     while True:
         # Check for cancellation
         if cancel and cancel.is_set():
@@ -188,24 +174,10 @@ def call_pi(
             proc.wait(timeout=5)
             return CANCELLED_MARKER
 
-        # Check for stall (no output for too long)
-        if stall_timeout and time.monotonic() - last_output_time > stall_timeout:
-            proc.terminate()
-            reader_thread.join(timeout=5)
-            proc.wait(timeout=5)
-            return (
-                f"[pi stalled — no output for {stall_timeout}s. "
-                f"This may be a permission gate requiring confirmation. "
-                f"Check guardrails.json or use --tools to restrict tools.]"
-            )
-
         try:
             line = line_queue.get(timeout=0.2)
         except queue.Empty:
-            continue  # no line yet — loop back to check cancel/stall
-
-        # Got output — reset stall timer
-        last_output_time = time.monotonic()
+            continue  # no line yet — loop back to check cancel
 
         if line is None:
             break  # EOF sentinel
