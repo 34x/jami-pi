@@ -46,7 +46,7 @@ _verbose = False
 
 def _ts():
     """Compact timestamp for log lines: HH:MM:SS"""
-    return datetime.now().strftime("%H:%M:%S")
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
 def bot_log(msg):
