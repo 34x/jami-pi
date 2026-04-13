@@ -41,7 +41,12 @@ class AckManager:
         return "\n".join(lines)
 
     def send_initial(self):
-        """Send the initial ack message."""
+        """Send the initial ack message.
+
+        The ack_msg_id is NOT set here — it's captured later by the
+        main event loop when the bot's own ack message notification arrives.
+        This avoids swallowing notifications that the main loop should handle.
+        """
         if self.no_ack:
             return
 
@@ -56,14 +61,6 @@ class AckManager:
                     "body": self._format(),
                 },
             )
-            # Wait briefly for our own message notification to get the ID
-            for _ in range(10):
-                evt = self.sdk.get_notification(timeout=0.5)
-                if evt and evt.get("method") == "onMessageReceived":
-                    p = evt.get("params", {})
-                    if p.get("body", "").startswith(ACK_PREFIX):
-                        self.ack_msg_id = p.get("id")
-                        break
         except Exception as e:
             print(f"[bot] ⚠️  Ack failed: {e}")
 

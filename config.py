@@ -69,7 +69,7 @@ def should_respond(body, trigger, bot_names, parent_id="", our_message_ids=None)
 
     if trigger == TRIGGER_SMART:
         if mentioned or replying_to_bot:
-            return "smart"  # needs further LLM relevance check
+            return "smart"  # TODO: add LLM relevance check before proceeding
         return False
 
     return False

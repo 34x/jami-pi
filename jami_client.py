@@ -94,21 +94,21 @@ class JamiStdioClient:
 
         Returns the 'result' dict on success.
         Raises Exception on JSON-RPC error or timeout.
+        Thread-safe: may be called from any thread (main loop, pi threads, etc.).
         """
-        if id is None:
-            id = self.next_id
-            self.next_id += 1
-
-        req = jsonrpc_request(method, params, id)
-        req_json = json.dumps(req)
-
         event = threading.Event()
         with self.lock:
+            if id is None:
+                id = self.next_id
+                self.next_id += 1
+
+            req = jsonrpc_request(method, params, id)
+            req_json = json.dumps(req)
+
             self.pending[id] = event
             self.pending_results[id] = None
 
-        # Write to stdin (lock protects against concurrent writes from pi threads)
-        with self.lock:
+            # Write to stdin (lock protects against concurrent writes)
             if self.proc and self.proc.stdin:
                 self.proc.stdin.write((req_json + "\n").encode("utf-8"))
                 self.proc.stdin.flush()

@@ -12,6 +12,8 @@ See: python3 bot.py --help
 
 import argparse
 import os
+import queue
+import shlex
 import sys
 import threading
 import time
@@ -72,6 +74,7 @@ class Conversation:
         self.cancel = None  # threading.Event to cancel current pi call
         self.sender_uri = None  # who we're currently processing
         self.greeted = False  # True after greeting sent (avoid duplicates)
+        self.ack = None  # current AckManager for progress updates
 
 
 def main():
@@ -150,12 +153,12 @@ def main():
     # Resolve jami-bridge binary path: --jami flag > JAMI_BRIDGE_PATH env > PATH lookup
     jami_binary = args.jami or os.environ.get("JAMI_BRIDGE_PATH") or "jami-bridge"
 
-    pi_extra = args.pi_args.split() if args.pi_args else None
+    pi_extra = shlex.split(args.pi_args) if args.pi_args else None
     use_sessions = not args.no_session
     os.makedirs(args.session_dir, exist_ok=True)
 
     # Resolve bridge args: --bridge-args string (space-split, like --pi-args)
-    bridge_args = args.bridge_args.split() if args.bridge_args else []
+    bridge_args = shlex.split(args.bridge_args) if args.bridge_args else []
 
     # ── Launch jami-bridge in stdio mode ────────────────────────────────────
     sdk = JamiStdioClient(
@@ -275,7 +278,7 @@ def main():
     conversations = {}
 
     # Pi result queue: (conv_id, reply_or_CANCELLED_MARKER, ack, partial_text)
-    pi_results = []
+    pi_results = queue.Queue()
 
     # ── Greeting ─────────────────────────────────────────────────────
     greeting_text = None
@@ -304,8 +307,6 @@ def main():
     def _short_id(conv_id: str) -> str:
         """Short conversation ID for display."""
         return conv_id[:12]
-
-    _ = _short_id  # used below
 
     # ── Discover conversations ────────────────────────────────────────
     has_auto_accept = any(
@@ -367,55 +368,24 @@ def main():
     # ── Pi call helpers ──────────────────────────────────────────────
 
     def _start_pi_for_conversation(conv: Conversation, params: dict):
-        """Start a pi call for a conversation. Called from the main loop."""
+        """Start a pi call for a conversation. Called from the main loop.
+
+        History loading is deferred to the pi thread to avoid blocking
+        the event loop. The ack message ID is captured asynchronously
+        by the main loop when our own ack message notification arrives.
+        """
         conv.busy = True
         conv.cancel = threading.Event()
         conv.sender_uri = params.get("from", "")
 
         # Send acknowledgment (from main loop — safe to call sdk)
         ack = AckManager(sdk, account_id, conv.conv_id, our_uri, no_ack=args.no_ack)
+        conv.ack = ack
         ack.send_initial()
 
-        # Prepare prompt with conversation context
+        # Determine session mode (fast — just a file existence check)
         sfile = session_path(conv.conv_id, args.session_dir) if use_sessions else None
         first_message = sfile and is_new_session(sfile)
-
-        if first_message:
-            try:
-                hist = sdk.call(
-                    "loadMessages",
-                    {
-                        "accountId": account_id,
-                        "conversationId": conv.conv_id,
-                        "count": args.history,
-                    },
-                )
-                conversation_history = list(reversed(hist.get("messages", [])))
-            except Exception:
-                conversation_history = None
-            prompt = build_prompt(
-                params, conversation_history, our_uri, known_senders, conv.member_count
-            )
-        elif use_sessions:
-            prompt = build_prompt(
-                params, None, our_uri, known_senders, conv.member_count
-            )
-        else:
-            try:
-                hist = sdk.call(
-                    "loadMessages",
-                    {
-                        "accountId": account_id,
-                        "conversationId": conv.conv_id,
-                        "count": args.history,
-                    },
-                )
-                conversation_history = list(reversed(hist.get("messages", [])))
-            except Exception:
-                conversation_history = None
-            prompt = build_prompt(
-                params, conversation_history, our_uri, known_senders, conv.member_count
-            )
 
         mode_label = (
             "new" if first_message else "continued" if use_sessions else "history"
@@ -435,7 +405,28 @@ def main():
             ack.on_progress(state)
 
         def _run_pi():
-            """Run pi in a background thread and put result in the shared queue."""
+            """Run pi in a background thread with history loading."""
+            # Load history in thread — doesn't block the main event loop.
+            # sdk.call is thread-safe (uses lock for stdin writes and unique IDs).
+            conversation_history = None
+            if first_message or not use_sessions:
+                try:
+                    hist = sdk.call(
+                        "loadMessages",
+                        {
+                            "accountId": account_id,
+                            "conversationId": conv.conv_id,
+                            "count": args.history,
+                        },
+                    )
+                    conversation_history = list(reversed(hist.get("messages", [])))
+                except Exception:
+                    conversation_history = None
+
+            prompt = build_prompt(
+                params, conversation_history, our_uri, known_senders, conv.member_count
+            )
+
             pi_result_box[0] = call_pi(
                 prompt,
                 session_file=sfile,
@@ -444,7 +435,7 @@ def main():
                 cancel=conv.cancel,
             )
             # Put result for the main loop to pick up
-            pi_results.append(
+            pi_results.put(
                 (conv.conv_id, pi_result_box[0], ack, partial_text_box[0])
             )
 
@@ -461,6 +452,7 @@ def main():
         if reply.strip() == SILENT_MARKER:
             bot_log("[bot] 🤫 pi chose to stay silent")
             ack.mark_done()
+            conv.ack = None
             conv.busy = False
             conv.cancel = None
             conv.sender_uri = None
@@ -483,6 +475,7 @@ def main():
         except Exception as e:
             bot_warn(f"[bot] ❌ Failed to send reply: {e}")
 
+        conv.ack = None
         conv.busy = False
         conv.cancel = None
         conv.sender_uri = None
@@ -491,8 +484,8 @@ def main():
     try:
         while True:
             # ── Drain pi results first ──────────────────────────────────
-            while pi_results:
-                conv_id, reply, ack, _ = pi_results.pop(0)
+            while not pi_results.empty():
+                conv_id, reply, ack, _ = pi_results.get_nowait()
                 conv = conversations.get(conv_id)
                 if not conv:
                     continue
@@ -505,6 +498,7 @@ def main():
                         f"[bot] ⚠️  pi thread returned no result for {_short_id(conv_id)}"
                     )
                     ack.mark_done()
+                    conv.ack = None
                     conv.busy = False
                     conv.cancel = None
                     conv.sender_uri = None
@@ -589,10 +583,17 @@ def main():
 
             # Track our own message IDs for reply detection (all conversations)
             if sender_uri == our_uri:
-                # Find the conversation and track the message ID
                 conv = conversations.get(conv_id_event)
                 if conv and msg_id:
                     conv.our_message_ids.add(msg_id)
+                    # Capture ack message ID for progress updates
+                    if (
+                        body.startswith(ACK_PREFIX)
+                        and conv.ack is not None
+                        and conv.ack.ack_msg_id is None
+                    ):
+                        conv.ack.ack_msg_id = msg_id
+                        bot_verbose(f"[bot] 📌 Captured ack ID: {msg_id}")
                 continue
 
             # Skip ack/status messages
@@ -618,6 +619,11 @@ def main():
                         "cancelling pi..."
                     )
                     conv.cancel.set()
+                    # Mark ack as cancelled if we have the message ID
+                    if conv.ack:
+                        if conv.ack.ack_msg_id:
+                            conv.ack.mark_cancelled()
+                        conv.ack = None
                     # Release conversation immediately — don't wait for pi
                     # thread to finish. The CANCELLED_MARKER result will be
                     # silently discarded when the main loop drains pi_results.
@@ -664,6 +670,8 @@ def main():
             decision = should_respond(
                 body, trigger, bot_names, parent_id, conv.our_message_ids
             )
+            # Note: trigger=smart returns "smart" (truthy) — an LLM
+            # relevance check could be added here in the future.
             if not decision:
                 bot_verbose(
                     f"[bot] 🔄 Skipping (trigger={trigger}, no mention/reply) in {_short_id(conv_id_event)}"

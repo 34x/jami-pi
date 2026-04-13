@@ -132,10 +132,8 @@ Built with [pi.dev](https://pi.dev) and **GLM-5.1**.
 # Start the bot (auto-detects account and conversation)
 python3 bot.py
 
-# Or specify explicitly
-python3 bot.py \
-  --account <account-id> \
-  --conversation <conversation-id>
+# Or specify account explicitly
+python3 bot.py --account <account-id>
 
 # List available accounts
 python3 bot.py --list-accounts
@@ -267,7 +265,6 @@ the prompt so pi can adjust its behavior.
 | `--jami PATH` | `$JAMI_BRIDGE_PATH` or `jami-bridge` | Path to jami-bridge binary |
 | `--account ID` | auto-detect | Account ID or URI |
 | `--list-accounts` | off | List accounts and exit |
-| `--conversation ID` | auto-detect | Conversation to monitor |
 | `--history N` | `20` | Recent messages to include as context |
 | `--session-dir DIR` | `/tmp/jami-pi-sessions` | Directory for pi session files |
 | `--no-session` | off | Disable pi sessions (stateless) |

@@ -60,4 +60,5 @@ def build_prompt(
         context = "\n".join(context_lines)
         return f"{context}\n\nNew message from [{sender}]: {body}"
     else:
-        return f"[{sender}]: {body}"
+        context = context_lines[0]  # e.g. "(1:1 chat)" or "(group chat, N members)"
+        return f"{context}\n[{sender}]: {body}"

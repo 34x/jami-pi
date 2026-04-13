@@ -4,6 +4,7 @@ import json
 import queue
 import subprocess
 import threading
+import time
 
 from config import CANCELLED_MARKER
 
@@ -38,6 +39,7 @@ def call_pi(
     extra_args=None,
     on_progress=None,
     cancel=None,
+    timeout=300,
 ):
     """Call pi in non-interactive JSON mode and return the assistant's reply text.
 
@@ -165,7 +167,8 @@ def call_pi(
 
         return False
 
-    # ── Main loop: drain lines from queue, check cancel ────────────
+    # ── Main loop: drain lines from queue, check cancel and timeout ────
+    start_time = time.time()
     while True:
         # Check for cancellation
         if cancel and cancel.is_set():
@@ -173,6 +176,14 @@ def call_pi(
             reader_thread.join(timeout=5)
             proc.wait(timeout=5)
             return CANCELLED_MARKER
+
+        # Check for timeout (default: 5 minutes)
+        elapsed = time.time() - start_time
+        if elapsed > timeout:
+            proc.terminate()
+            reader_thread.join(timeout=5)
+            proc.wait(timeout=5)
+            return f"[pi timed out after {int(timeout)}s]"
 
         try:
             line = line_queue.get(timeout=0.2)
