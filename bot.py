@@ -88,7 +88,7 @@ class Conversation:
 def main():
     parser = argparse.ArgumentParser(description="jami-pi: Jami <-> pi chat bridge")
     parser.add_argument(
-        "--version", action="version", version="jami-pi 0.1.0"
+        "--version", action="version", version="jami-pi 0.2.0"
     )
     parser.add_argument(
         "--jami",
