@@ -91,7 +91,10 @@ def main():
         help="Path to jami-bridge binary (or set JAMI_BRIDGE_PATH env)",
     )
     parser.add_argument(
-        "--account", default=None, help="Account ID or URI (auto-detect)"
+        "--account",
+        default=None,
+        help="Account spec: hex ID, jami://URI, archive:///path.gz, /path.gz (create+export), or new. "
+        "Default: serve all accounts (auto-detect).",
     )
     parser.add_argument(
         "--list-accounts", action="store_true", help="List accounts and exit"
@@ -195,7 +198,28 @@ def main():
     )
     sdk.start()
 
-    # ── Discover account ─────────────────────────────────────────────
+    # ── Log startup configuration ──────────────────────────────────────
+    effective_bridge_args = ["--stdio"] + bridge_args
+    bot_log("[bot] ━━ Startup Config ━━")
+    bot_log(f"[bot]   Bridge binary:  {jami_binary}")
+    bot_log(f"[bot]   Bridge args:    {effective_bridge_args}")
+    bot_log(f"[bot]   Account spec:   {args.account or '(auto-detect)'}")
+    bot_log(f"[bot]   Trigger:        {args.trigger}")
+    bot_log(f"[bot]   Pi args:        {args.pi_args or '(none)'}")
+    bot_log(
+        f"[bot]   Session dir:    {args.session_dir}{'' if args.no_session else ' (active)'}"
+    )
+    bot_log(f"[bot]   History:        {args.history} messages")
+    bot_log(f"[bot]   Greeting:       {args.greeting}")
+    bot_log(f"[bot]   Ack:             {'disabled' if args.no_ack else 'enabled'}")
+    bot_log(f"[bot]   Dry run:        {args.dry_run}")
+    bot_log("[bot] ━━━━━━━━━━━━━━━━━━━━")
+
+    # ── Discover accounts ──────────────────────────────────────────
+    # The bridge handles account resolution (including import/create).
+    # Bot.py discovers what accounts exist after the bridge starts.
+    # When --account is specified, the bridge filters events to that account.
+    # When --account is not specified, the bridge serves ALL accounts.
     result = sdk.call("listAccounts")
     accounts = result.get("accounts", [])
 
@@ -212,34 +236,30 @@ def main():
         sdk.stop()
         return
 
-    # Resolve account: by ID, by URI, or auto-detect
-    if args.account:
-        if args.account in accounts:
-            account_id = args.account
-        else:
-            # Try matching by URI
-            account_id = None
-            for aid in accounts:
-                details = sdk.call("getAccountDetails", {"accountId": aid})
-                d = details.get("details") or {}
-                if d.get("Account.username") == args.account:
-                    account_id = aid
-                    break
-            if not account_id:
-                print(f"Account not found: {args.account}")
-                print(f"Available accounts: {', '.join(accounts)}")
-                sys.exit(1)
-    else:
-        if not accounts:
-            print("No accounts found. Create one first.")
-            sys.exit(1)
-        account_id = accounts[0]
+    if not accounts:
+        print("No accounts found. Create one first.")
+        sys.exit(1)
 
-    # Get our own URI so we can ignore our own messages
-    details = sdk.call("getAccountDetails", {"accountId": account_id})
-    d = details.get("details") or {}
-    our_uri = d.get("Account.username", "")
-    our_alias = d.get("Account.alias", "bot")
+    # Build account_id -> identity mapping for all accounts we serve.
+    # When --account is specified: serve that single account.
+    # When --account is not specified: serve ALL accounts.
+    account_identities = {}  # account_id -> {uri, alias}
+    for aid in accounts:
+        details = sdk.call("getAccountDetails", {"accountId": aid})
+        d = details.get("details") or {}
+        account_identities[aid] = {
+            "uri": d.get("Account.username", ""),
+            "alias": d.get("Account.alias", "bot"),
+        }
+
+    # Single-account mode: use the first (only) account for API calls
+    # that still require a single account_id.
+    account_id = accounts[0]
+    our_uris = {info["uri"] for info in account_identities.values() if info.get("uri")}
+    our_aliases = {
+        info["alias"] for info in account_identities.values() if info.get("alias")
+    }
+    our_uri = account_identities[account_id]["uri"]
 
     # ── Register name (one-shot, exit after) ──────────────────────────────
     if args.register_name:
@@ -274,32 +294,41 @@ def main():
         return
 
     # ── Apply alias if specified ────────────────────────────────────────
-    if args.alias is not None and args.alias != our_alias:
-        bot_log(f"[bot] Setting alias: {our_alias} → {args.alias}")
-        sdk.call(
-            "updateProfile",
-            {"accountId": account_id, "displayName": args.alias},
-        )
-        our_alias = args.alias
+    if args.alias is not None and args.alias not in our_aliases:
+        bot_log(f"[bot] Setting alias for {len(accounts)} account(s): {args.alias}")
+        for aid in accounts:
+            sdk.call(
+                "updateProfile",
+                {"accountId": aid, "displayName": args.alias},
+            )
+        # Refresh identity mappings
+        for aid in accounts:
+            account_identities[aid]["alias"] = args.alias
+        our_aliases = {args.alias}
 
-    # ── Build trigger names from alias + URI fragment ────────────────
+    # ── Build trigger names from all accounts' aliases + URI fragments ───
     bot_names = []
-    if our_alias:
-        bot_names.append(our_alias.lower())
-    # Add short URI fragment (last 8 chars) as a fallback name
-    uri_short = our_uri.rsplit(":", 1)[-1][-8:] if ":" in our_uri else our_uri[-8:]
-    if uri_short and uri_short not in bot_names:
-        bot_names.append(uri_short.lower())
+    for alias in our_aliases:
+        if alias and alias.lower() not in bot_names:
+            bot_names.append(alias.lower())
+    for uri in our_uris:
+        uri_short = uri.rsplit(":", 1)[-1][-8:] if ":" in uri else uri[-8:]
+        if uri_short and uri_short.lower() not in bot_names:
+            bot_names.append(uri_short.lower())
 
     trigger = args.trigger
-    bot_log(f"[bot] Account: {account_id}")
-    bot_log(f"[bot] Our URI: {our_uri}")
-    bot_log(f"[bot] Our alias: {our_alias}")
+    for aid in accounts:
+        bot_log(
+            f"[bot] Account: {aid} (uri={account_identities[aid]['uri']}, alias={account_identities[aid]['alias']})"
+        )
     bot_log(f"[bot] Trigger: {trigger} (names: {bot_names})")
 
     # ── Shared state ─────────────────────────────────────────────────
     # known_senders is global across conversations (URIs are unique)
-    known_senders = {our_uri: our_alias or "bot"}
+    known_senders = {}
+    for info in account_identities.values():
+        if info.get("uri"):
+            known_senders[info["uri"]] = info.get("alias") or "bot"
 
     # Per-conversation state: conv_id -> Conversation
     conversations = {}
@@ -539,10 +568,10 @@ def main():
             params = event.get("params", {})
 
             # ── Filter events by account (defense-in-depth) ────────────
-            # The bridge already filters events to only emit for our account
-            # when --account is specified. This check is a safety net in case
-            # the bridge is misconfigured or has multiple accounts loaded.
-            if method not in ("onReady",):
+            # When serving a specific account (--account), ignore events
+            # for other accounts. When serving all accounts, all events
+            # are valid.
+            if len(accounts) == 1 and method not in ("onReady",):
                 evt_account = params.get("accountId", "")
                 if evt_account and evt_account != account_id:
                     bot_verbose(
@@ -620,7 +649,7 @@ def main():
                 continue
 
             # Track our own message IDs for reply detection (all conversations)
-            if sender_uri == our_uri:
+            if sender_uri in our_uris:
                 conv = conversations.get(conv_id_event)
                 if conv and msg_id:
                     conv.our_message_ids.add(msg_id)
