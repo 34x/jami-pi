@@ -122,7 +122,13 @@ def main():
         default="online",
         help='Send a greeting on startup: "online" (default), custom text, or "false" to disable',
     )
-    parser.add_argument("--pi-args", default="", help="Extra pi args (space-separated)")
+    parser.add_argument(
+        "--pi-args",
+        default="",
+        help="Extra pi args (space-separated, shell quoting). "
+        "Multi-word values need inner quotes: "
+        "--pi-args='--system-prompt \"You are a bot\"'",
+    )
     parser.add_argument(
         "--bridge-args",
         default="",
