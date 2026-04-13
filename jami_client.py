@@ -1,8 +1,6 @@
 """Jami bridge stdio client — JSON-RPC 2.0 over stdin/stdout."""
 
-import fcntl
 import json
-import os
 import queue
 import subprocess
 import threading
@@ -49,7 +47,6 @@ class JamiStdioClient:
         self.notifications = queue.Queue()
         self.lock = threading.Lock()  # protects pending dict + stdin writes
         self.next_id = 1
-        self._buf = ""
 
     def start(self):
         """Launch the jami-bridge subprocess and start the reader thread."""
@@ -156,27 +153,15 @@ class JamiStdioClient:
             pass
 
     def _reader(self):
-        """Reader thread: read JSON-RPC from SDK stdout and dispatch."""
-        fd = self.proc.stdout.fileno()
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        """Reader thread: read JSON-RPC from bridge stdout and dispatch.
 
-        while True:
-            try:
-                data = os.read(fd, 4096)
-                if not data:
-                    break
-                self._buf += data.decode("utf-8", errors="replace")
-            except BlockingIOError:
-                time.sleep(0.1)
-                continue
-            except OSError:
-                break
-
-            # Process complete lines
-            while "\n" in self._buf:
-                line, self._buf = self._buf.split("\n", 1)
-                line = line.strip()
+        Uses blocking readline for portability (works on Linux, macOS, Windows).
+        No fcntl or non-blocking I/O needed — the thread simply blocks until
+        a full line arrives, then dispatches it.
+        """
+        try:
+            for raw_line in self.proc.stdout:
+                line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line:
                     continue
                 try:
@@ -185,6 +170,9 @@ class JamiStdioClient:
                     # Skip non-JSON lines (e.g. pjlib init message)
                     continue
                 self._dispatch(obj)
+        except (ValueError, OSError):
+            # stdout closed or process terminated
+            pass
 
     def _dispatch(self, obj):
         """Route a JSON-RPC object to the right handler."""

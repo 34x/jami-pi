@@ -120,7 +120,7 @@ pushed from bridge to bot in real-time — no polling needed.
 
 - **[jami-bridge](https://github.com/34x/jami-bridge)** binary ([download from releases](https://github.com/34x/jami-bridge/releases), in PATH, set `JAMI_BRIDGE_PATH` env, or specify with `--jami`)
 - **[pi](https://pi.dev)** CLI installed and configured
-- **python3** ≥3.9 (stdlib only — no extra packages). **Linux/macOS required** (uses `fcntl`).
+- **python3** ≥3.9 (stdlib only — no extra packages). Works on Linux, macOS, and Windows.
 
 This is an **unofficial community project**. It is not affiliated with, endorsed by, or officially connected to the Jami or pi projects.
 

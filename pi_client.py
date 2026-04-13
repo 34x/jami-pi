@@ -1,12 +1,19 @@
 """pi CLI interface — call pi in JSON mode, stream output, track progress."""
 
-import fcntl
 import json
-import os
+import queue
 import subprocess
+import threading
 import time
 
 from config import CANCELLED_MARKER
+
+# Default stall timeout: kill pi if it produces no output for this many seconds.
+# This prevents the bot from hanging forever when pi waits for user
+# confirmation (e.g. guardrails permissionGate prompts on dangerous
+# commands like sudo, rm -rf, etc.) which can't be answered in
+# non-interactive --print mode.
+DEFAULT_STALL_TIMEOUT = 60
 
 
 def _tool_label(name, args):
@@ -39,6 +46,7 @@ def call_pi(
     extra_args=None,
     on_progress=None,
     cancel=None,
+    stall_timeout=DEFAULT_STALL_TIMEOUT,
 ):
     """Call pi in non-interactive JSON mode and return the assistant's reply text.
 
@@ -48,6 +56,10 @@ def call_pi(
                  Set state["force_update"] = True to bypass throttle.
     cancel: optional threading.Event — set it to terminate pi immediately.
             Returns CANCELLED_MARKER if cancelled.
+    stall_timeout: seconds with no output before killing pi (default: 60).
+                   Prevents hangs when pi waits for user confirmation
+                   (e.g. guardrails permissionGate) that can't be answered
+                   in non-interactive mode. Set to 0 to disable.
     """
     cmd = ["pi", "--print", "--mode", "json"]
 
@@ -66,18 +78,29 @@ def call_pi(
     except FileNotFoundError:
         return "[pi not found — is it installed?]"
 
-    # Make stdout non-blocking so we can check cancel between reads
-    fd = proc.stdout.fileno()
-    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    # Reader thread: reads lines from pi stdout and puts them in a queue.
+    # This is portable (no fcntl) and works on Linux, macOS, and Windows.
+    # When the process is terminated (e.g. on cancel), readline unblocks
+    # and raises ValueError/OSError, ending the thread cleanly.
+    line_queue = queue.Queue()
+
+    def _reader():
+        try:
+            for raw_line in proc.stdout:
+                line_queue.put(raw_line.decode("utf-8", errors="replace").strip())
+        except (ValueError, OSError):
+            pass  # stdout closed after terminate()
+        line_queue.put(None)  # sentinel: EOF
+
+    reader_thread = threading.Thread(target=_reader, daemon=True)
+    reader_thread.start()
 
     reply = None
     token_count = 0
     text_so_far = ""
     last_progress = 0
     model = ""
-    tools = []  # list of (label, status) — label is like "read foo.py", status is "running" or "done"
-    buf = ""
+    tools = []  # list of (label, status)
 
     state = {"tokens": 0, "text": "", "tools": [], "model": ""}
 
@@ -155,39 +178,46 @@ def call_pi(
 
         return False
 
-    # ── Non-blocking read loop ──────────────────────────────────────
+    # ── Main loop: drain lines from queue, check cancel/stall ──────
+    last_output_time = time.monotonic()
     while True:
         # Check for cancellation
         if cancel and cancel.is_set():
             proc.terminate()
+            reader_thread.join(timeout=5)
             proc.wait(timeout=5)
             return CANCELLED_MARKER
 
-        # Try to read available data
+        # Check for stall (no output for too long)
+        if stall_timeout and time.monotonic() - last_output_time > stall_timeout:
+            proc.terminate()
+            reader_thread.join(timeout=5)
+            proc.wait(timeout=5)
+            return (
+                f"[pi stalled — no output for {stall_timeout}s. "
+                f"This may be a permission gate requiring confirmation. "
+                f"Check guardrails.json or use --tools to restrict tools.]"
+            )
+
         try:
-            data = os.read(fd, 8192)
-            if not data:
-                break  # EOF
-            buf += data.decode("utf-8", errors="replace")
-        except BlockingIOError:
-            # No data available — brief sleep then retry
-            time.sleep(0.1)
-            continue
-        except OSError:
-            break
+            line = line_queue.get(timeout=0.2)
+        except queue.Empty:
+            continue  # no line yet — loop back to check cancel/stall
 
-        # Process complete lines from buffer
-        while "\n" in buf:
-            line, buf = buf.split("\n", 1)
-            line = line.strip()
-            if not line:
-                continue
-            if _process_line(line):
-                break
-        else:
-            continue
-        break  # agent_end was reached — exit outer loop
+        # Got output — reset stall timer
+        last_output_time = time.monotonic()
 
+        if line is None:
+            break  # EOF sentinel
+
+        if not line:
+            continue
+
+        if _process_line(line):
+            break  # agent_end reached
+
+    # Wait for process and reader to finish
+    reader_thread.join(timeout=5)
     proc.wait()
     if proc.returncode != 0 and not reply:
         return f"[pi exited with code {proc.returncode}]"
