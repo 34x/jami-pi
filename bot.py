@@ -497,10 +497,8 @@ def main():
                 if not conv:
                     continue
                 if reply == CANCELLED_MARKER:
-                    # Already handled in the cancel code path
-                    conv.busy = False
-                    conv.cancel = None
-                    conv.sender_uri = None
+                    # Already handled when cancel.set() was called —
+                    # conversation was freed immediately. Just discard.
                     continue
                 if reply is None:
                     bot_warn(
@@ -613,18 +611,38 @@ def main():
 
             # ── Handle busy conversation ──────────────────────────────
             if conv.busy:
-                # Same sender: check for stop command
-                if sender_uri == conv.sender_uri and is_stop_command(body):
+                # Anyone in the conversation can stop (not just the sender)
+                if is_stop_command(body):
                     bot_log(
-                        f"[bot] 🛑 Stop command in {_short_id(conv_id_event)}, cancelling pi..."
+                        f"[bot] 🛑 Stop command in {_short_id(conv_id_event)}, "
+                        "cancelling pi..."
                     )
                     conv.cancel.set()
+                    # Release conversation immediately — don't wait for pi
+                    # thread to finish. The CANCELLED_MARKER result will be
+                    # silently discarded when the main loop drains pi_results.
+                    conv.busy = False
+                    conv.sender_uri = None
+                    conv.cancel = None
+                    # Confirm cancellation to the user
+                    try:
+                        sdk.call(
+                            "sendMessage",
+                            {
+                                "accountId": account_id,
+                                "conversationId": conv_id_event,
+                                "body": "🛑 Stopped.",
+                            },
+                        )
+                    except Exception:
+                        pass
                     continue
 
-                # Any other message while busy: ask sender to retry later
+                # Other messages while busy: ask sender to retry later
                 busy_sender = format_sender(sender_uri, known_senders)
                 bot_log(
-                    f"[bot] ⏳ Busy in {_short_id(conv_id_event)} — message from {busy_sender} rejected"
+                    f"[bot] ⏳ Busy in {_short_id(conv_id_event)} — "
+                    f"message from {busy_sender} rejected"
                 )
                 try:
                     sdk.call(
@@ -632,7 +650,10 @@ def main():
                         {
                             "accountId": account_id,
                             "conversationId": conv_id_event,
-                            "body": "⏳ I'm still working on a request. Please resend your message later.",
+                            "body": (
+                                "⏳ I'm still working on a request. "
+                                "Send 'stop' to cancel, or resend later."
+                            ),
                         },
                     )
                 except Exception:
