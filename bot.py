@@ -17,6 +17,7 @@ import shlex
 import sys
 import threading
 import time
+from datetime import datetime
 
 from ack import AckManager
 from config import (
@@ -43,21 +44,26 @@ _quiet = False
 _verbose = False
 
 
+def _ts():
+    """Compact timestamp for log lines: HH:MM:SS"""
+    return datetime.now().strftime("%H:%M:%S")
+
+
 def bot_log(msg):
     """Print info-level bot message. Suppressed by --quiet."""
     if not _quiet:
-        print(msg)
+        print(f"{_ts()} {msg}")
 
 
 def bot_warn(msg):
-    """Print warning/eorror. Always visible."""
-    print(msg, file=sys.stderr)
+    """Print warning/error. Always visible."""
+    print(f"{_ts()} {msg}", file=sys.stderr)
 
 
 def bot_verbose(msg):
     """Print debug/verbose message. Only shown with --verbose."""
     if _verbose:
-        print(msg, file=sys.stderr)
+        print(f"{_ts()} {msg}", file=sys.stderr)
 
 
 # ── Per-conversation state ──────────────────────────────────────────────
