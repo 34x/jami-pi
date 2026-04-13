@@ -168,6 +168,19 @@ def main():
     # Resolve bridge args: --bridge-args string (space-split, like --pi-args)
     bridge_args = shlex.split(args.bridge_args) if args.bridge_args else []
 
+    # If --account is specified, pass it to the bridge for event filtering.
+    # This ensures the bridge only emits events for the selected account,
+    # preventing cross-account event leakage when the daemon has multiple
+    # accounts loaded.
+    #
+    # We do this BEFORE starting the bridge so the filter is active from the
+    # start. The bridge resolves accounts at startup — if it finds the same
+    # account we specify, the filter matches. If the user also passed
+    # --account in --bridge-args, we don't duplicate (the user's version
+    # takes precedence since it's more specific).
+    if args.account and "--account" not in bridge_args:
+        bridge_args.extend(["--account", args.account])
+
     # ── Launch jami-bridge in stdio mode ────────────────────────────────────
     sdk = JamiStdioClient(
         jami_binary=jami_binary,
@@ -518,6 +531,19 @@ def main():
 
             method = event.get("method", "")
             params = event.get("params", {})
+
+            # ── Filter events by account (defense-in-depth) ────────────
+            # The bridge already filters events to only emit for our account
+            # when --account is specified. This check is a safety net in case
+            # the bridge is misconfigured or has multiple accounts loaded.
+            if method not in ("onReady",):
+                evt_account = params.get("accountId", "")
+                if evt_account and evt_account != account_id:
+                    bot_verbose(
+                        f"[bot] 🔄 Ignoring event {method} for account "
+                        f"{evt_account[:8]}... (not our account)"
+                    )
+                    continue
 
             # ── Handle conversation ready (new/accepted conversation) ───
             if method == "onConversationReady":
