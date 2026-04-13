@@ -138,8 +138,17 @@ python3 bot.py --version
 # Or specify account explicitly
 python3 bot.py --account <account-id>
 
+# Create account from archive, or create new + export
+python3 bot.py --account /tmp/bot-account.gz
+
 # List available accounts
 python3 bot.py --list-accounts
+
+# Set bot display name (pushed to contacts)
+python3 bot.py --alias "MyBot"
+
+# Register a public Jami username (one-shot)
+python3 bot.py --register-name mybot
 
 # Dry-run (don't call pi, just log messages)
 python3 bot.py --dry-run
@@ -166,6 +175,12 @@ python3 bot.py --greeting false
 
 # Pass extra args to pi
 python3 bot.py --pi-args "--model gpt-4o"
+
+# Pass extra args to jami-bridge
+python3 bot.py --bridge-args '--auto-accept'
+
+# Show bridge stderr (daemon logs)
+python3 bot.py --verbose
 ```
 
 ## Features
@@ -269,7 +284,9 @@ the prompt so pi can adjust its behavior.
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--jami PATH` | `$JAMI_BRIDGE_PATH` or `jami-bridge` | Path to jami-bridge binary |
-| `--account ID` | auto-detect | Account ID or URI |
+| `--account SPEC` | auto-detect (all accounts) | Account: hex ID, `jami://URI`, `/path.gz` (import or create+export), `new` |
+| `--alias NAME` | (none) | Set bot display name (pushed to contacts via updateProfile) |
+| `--register-name NAME` | (none) | Register a public Jami username (one-shot, then exit) |
 | `--list-accounts` | off | List accounts and exit |
 | `--history N` | `20` | Recent messages to include as context |
 | `--session-dir DIR` | system temp + `/jami-pi-sessions` | Directory for pi session files |
@@ -278,7 +295,10 @@ the prompt so pi can adjust its behavior.
 | `--greeting TEXT` | `online` | Startup greeting: `online` sends "🟢 I'm online!", custom text, or `false` to disable |
 | `--trigger MODE` | `all` | When to respond: `all`, `mention`, or `smart` |
 | `--pi-args ARGS` | (none) | Extra arguments passed to pi CLI |
+| `--bridge-args ARGS` | (none) | Extra arguments passed to jami-bridge (space-separated) |
 | `--timeout N` | `300` | pi call timeout in seconds (0 = no timeout) |
+| `--verbose` | off | Show bridge stderr output (daemon logs) |
+| `--quiet` | off | Suppress all non-essential bot output |
 | `--dry-run` | off | Log messages without calling pi |
 
 ## Protocol Details
@@ -298,6 +318,8 @@ The bot uses these JSON-RPC methods (same as HTTP API):
 | `sendMessage` | `{accountId, conversationId, body}` | `{sent, conversationId}` |
 | `editMessage` | `{accountId, conversationId, messageId, body}` | `{edited}` |
 | `loadMessages` | `{accountId, conversationId, count?, from?}` | `{messages: [msg]}` |
+| `registerName` | `{accountId, name}` | `{registered}` |
+| `updateProfile` | `{accountId, displayName?}` | `{updated}` |
 
 ### Event Notifications
 
@@ -309,6 +331,11 @@ Pushed by bridge when events occur:
 | `onMessageReceived` | `{accountId, conversationId, from, body, id, type, timestamp}` | New message in conversation |
 | `onRegistrationChanged` | `{accountId, state, code, detail}` | Account registration status changed |
 | `onConversationRequestReceived` | `{accountId, conversationId}` | New conversation invite received |
+| `onConversationReady` | `{accountId, conversationId}` | Conversation finished loading |
+| `onConversationMemberEvent` | `{accountId, conversationId, memberUri, event}` | Member added/removed |
+| `onMessageStatusChanged` | `{accountId, conversationId, peer, messageId, state}` | Message delivery status changed |
+| `onTrustRequestReceived` | `{accountId, from, conversationId}` | Incoming contact request |
+| `onNameRegistrationEnded` | `{accountId, state, name}` | Name registration result |
 
 ## Architecture
 
@@ -340,21 +367,27 @@ Pushed by bridge when events occur:
 ## Example Session
 
 ```
-[bot] Account: <account-id>
-[bot] Our URI: <your-jami-uri>
-[bot] Our alias: MyBot
-[bot] Trigger: all (names: ['mybot', 'a1b2c3d4'])
-[bot] Conversation: <conversation-id> (2 members)
-[bot] Session: <session-dir>/<conversation-id>.json
-[bot] History: 20 messages as context
-[bot] Ack: enabled
-[bot] Waiting for messages... (Ctrl+C to stop)
+14:46:00.123 [bot] ━━ Startup Config ━━
+14:46:00.123 [bot]   Bridge binary:  ./jami-bridge
+14:46:00.123 [bot]   Bridge args:    ['--stdio', '--auto-accept']
+14:46:00.123 [bot]   Account spec:   (auto-detect)
+14:46:00.123 [bot]   Trigger:        all
+14:46:00.123 [bot]   Pi args:        --model gpt-4o
+14:46:00.123 [bot]   Session dir:    /tmp/jami-pi-sessions (active)
+14:46:00.123 [bot]   History:        20 messages
+14:46:00.123 [bot]   Greeting:       online
+14:46:00.123 [bot]   Ack:             enabled
+14:46:00.123 [bot]   Dry run:        False
+14:46:00.123 [bot] ━━━━━━━━━━━━━━━━━━━━
+14:46:01.234 [bot] Account: <account-id> (uri: <your-jami-uri>, alias: MyBot)
+14:46:01.234 [bot] Trigger: all (names: ['mybot', 'a1b2c3d4'])
+14:46:01.234 [bot] Conversation: <conv-id> (2 members)
+14:46:01.234 [bot] Monitoring 1 conversation(s)
+14:46:01.234 [bot] 👋 Greeting sent to 1 conversation(s)
+14:46:01.234 [bot] Ready. (Ctrl+C to stop)
 
-[bot] 📨 From <sender>: hello!
-[bot] 📬 Ack sent
-[bot] 🤖 Calling pi (new session)...
-[bot] 🤖 Reply: Hi there! How can I assist you today?
-[bot] ✅ Reply sent
+14:46:05.567 [bot] 🤖 Calling pi (new session) for <conv-id>...
+14:46:05.567 [bot] 🤖 Reply sent to <conv-id>
 ```
 
 ## License
