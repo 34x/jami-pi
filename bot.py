@@ -33,7 +33,7 @@ from config import (
     session_path,
     should_respond,
 )
-from formatting import build_prompt, format_sender
+from formatting import build_prompt
 from jami_client import JamiStdioClient
 from pi_client import call_pi
 
@@ -512,8 +512,7 @@ def main():
             conv.sender_uri = None
             return
 
-        reply_preview = reply[:100] + ("..." if len(reply) > 100 else "")
-        bot_log(f"[bot] 🤖 Reply for {_short_id(conv_id)}: {reply_preview}")
+        bot_log(f"[bot] 🤖 Reply sent to {_short_id(conv_id)}")
 
         try:
             sdk.call(
@@ -682,8 +681,7 @@ def main():
                 # Anyone in the conversation can stop (not just the sender)
                 if is_stop_command(body):
                     bot_log(
-                        f"[bot] 🛑 Stop command in {_short_id(conv_id_event)}, "
-                        "cancelling pi..."
+                        f"[bot] 🛑 Stop in {_short_id(conv_id_event)}, cancelling..."
                     )
                     conv.cancel.set()
                     # Mark ack as cancelled if we have the message ID
@@ -712,10 +710,8 @@ def main():
                     continue
 
                 # Other messages while busy: ask sender to retry later
-                busy_sender = format_sender(sender_uri, known_senders)
                 bot_log(
-                    f"[bot] ⏳ Busy in {_short_id(conv_id_event)} — "
-                    f"message from {busy_sender} rejected"
+                    f"[bot] ⏳ Busy in {_short_id(conv_id_event)} — message rejected"
                 )
                 try:
                     sdk.call(
