@@ -26,7 +26,7 @@ Jami user ↔ jami-bridge (STDIO) ↔ bot.py ↔ pi
 - **jami-bridge** binary — runtime dependency (not imported, just a subprocess)
   - Set path via `--jami PATH`, `JAMI_BRIDGE_PATH` env var, or have it in PATH
 - **pi** CLI — installed and configured for AI responses
-- **python3** — stdlib only, no extra packages. Note: uses `fcntl` (Linux/macOS only)
+- **python3** ≥3.9 — stdlib only, no extra packages. Cross-platform (Linux, macOS, Windows).
 
 ## Key Files
 

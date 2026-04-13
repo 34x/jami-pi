@@ -13,8 +13,8 @@ def _tool_label(name, args):
     """Build a readable label for a tool call: 'read bot.py', 'edit foo.sh', etc."""
     path = args.get("path", "")
     if path:
-        # Shorten to just the filename (no directory)
-        short = path.rsplit("/", 1)[-1]
+        # Shorten to just the filename (cross-platform: handles both / and \)
+        short = path.replace("\\", "/").rsplit("/", 1)[-1]
         offset = args.get("offset")
         if offset and name == "read":
             return f"{name} {short}:{offset}"

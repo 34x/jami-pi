@@ -1,6 +1,7 @@
 """Configuration, constants, and path helpers for jami-pi."""
 
 import os
+import tempfile
 
 # Prefix for bot acknowledgment/status messages — used to filter them from pi context
 ACK_PREFIX = "[bot:"
@@ -14,8 +15,8 @@ STOP_WORDS = {"stop", "abort", "cancel", "kill"}
 # Marker returned when pi is cancelled by user
 CANCELLED_MARKER = "[CANCELLED]"
 
-# Default session directory
-DEFAULT_SESSION_DIR = "/tmp/jami-pi-sessions"
+# Default session directory (cross-platform)
+DEFAULT_SESSION_DIR = os.path.join(tempfile.gettempdir(), "jami-pi-sessions")
 
 # Default history size
 DEFAULT_HISTORY = 20

@@ -186,7 +186,7 @@ The bot launches `jami-bridge --stdio` and communicates via JSON-RPC:
 ### Sessions & Conversation Memory
 
 By default, each Jami conversation gets its own **pi session file** stored in
-`--session-dir` (default: `/tmp/jami-pi-sessions/`). pi maintains full
+`--session-dir` (default: system temp dir + `/jami-pi-sessions/`). pi maintains full
 conversation context across calls and autocompacts long histories automatically.
 
 On the first message of a new session, the bot loads recent Jami messages (up
@@ -266,7 +266,7 @@ the prompt so pi can adjust its behavior.
 | `--account ID` | auto-detect | Account ID or URI |
 | `--list-accounts` | off | List accounts and exit |
 | `--history N` | `20` | Recent messages to include as context |
-| `--session-dir DIR` | `/tmp/jami-pi-sessions` | Directory for pi session files |
+| `--session-dir DIR` | system temp + `/jami-pi-sessions` | Directory for pi session files |
 | `--no-session` | off | Disable pi sessions (stateless) |
 | `--no-ack` | off | Disable acknowledgment messages |
 | `--greeting TEXT` | `online` | Startup greeting: `online` sends "🟢 I'm online!", custom text, or `false` to disable |
@@ -338,7 +338,7 @@ Pushed by bridge when events occur:
 [bot] Our alias: MyBot
 [bot] Trigger: all (names: ['mybot', 'a1b2c3d4'])
 [bot] Conversation: <conversation-id> (2 members)
-[bot] Session: /tmp/jami-pi-sessions/<conversation-id>.json
+[bot] Session: <session-dir>/<conversation-id>.json
 [bot] History: 20 messages as context
 [bot] Ack: enabled
 [bot] Waiting for messages... (Ctrl+C to stop)
