@@ -232,7 +232,7 @@ def main():
                 d = details.get("details") or {}
                 uri = d.get("Account.username", "?")
                 alias = d.get("Account.alias", "?")
-                print(f"{aid}  uri={uri}  alias={alias}")
+                print(f"{aid}  uri: {uri}  alias: {alias}")
         sdk.stop()
         return
 
@@ -319,7 +319,7 @@ def main():
     trigger = args.trigger
     for aid in accounts:
         bot_log(
-            f"[bot] Account: {aid} (uri={account_identities[aid]['uri']}, alias={account_identities[aid]['alias']})"
+            f"[bot] Account: {aid} (uri: {account_identities[aid]['uri']}, alias: {account_identities[aid]['alias']})"
         )
     bot_log(f"[bot] Trigger: {trigger} (names: {bot_names})")
 
