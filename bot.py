@@ -126,7 +126,9 @@ def main():
     parser.add_argument(
         "--bridge-args",
         default="",
-        help="Extra bridge args (space-separated, e.g. '--auto-accept-from abc123')",
+        help="Extra jami-bridge args (space-separated). "
+        "Use '=' if value starts with '--': --bridge-args='--auto-accept' "
+        "or --bridge-args='--auto-accept-from abc123'",
     )
     parser.add_argument(
         "--trigger",
@@ -435,9 +437,7 @@ def main():
                 cancel=conv.cancel,
             )
             # Put result for the main loop to pick up
-            pi_results.put(
-                (conv.conv_id, pi_result_box[0], ack, partial_text_box[0])
-            )
+            pi_results.put((conv.conv_id, pi_result_box[0], ack, partial_text_box[0]))
 
         t = threading.Thread(target=_run_pi, daemon=True)
         t.start()
