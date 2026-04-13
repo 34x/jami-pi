@@ -11,6 +11,11 @@ dist/
 *.session
 sessions/
 
+# Test / coverage
+.pytest_cache/
+htmlcov/
+.coverage
+
 # Editor / OS
 *.swp
 *~
@@ -19,3 +24,6 @@ sessions/
 # IDE
 .vscode/
 .idea/
+
+# Ruff
+.ruff_cache/

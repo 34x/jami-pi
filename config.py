@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from collections import OrderedDict
 
 # Prefix for bot acknowledgment/status messages — used to filter them from pi context
 ACK_PREFIX = "[bot:"
@@ -21,6 +22,12 @@ DEFAULT_SESSION_DIR = os.path.join(tempfile.gettempdir(), "jami-pi-sessions")
 # Default history size
 DEFAULT_HISTORY = 20
 
+# Default pi timeout in seconds
+DEFAULT_PI_TIMEOUT = 300
+
+# Max number of our own message IDs to track per conversation (for reply detection)
+MAX_OUR_MESSAGE_IDS = 500
+
 # Trigger modes
 TRIGGER_ALL = "all"  # respond to every message (1:1 default)
 TRIGGER_MENTION = "mention"  # respond only if bot name mentioned or reply to bot
@@ -34,8 +41,7 @@ def is_stop_command(body):
     Only matches if the entire message (after stripping) is a single stop word.
     "stop doing that" does NOT match — only exact single-word matches.
     """
-    word = body.strip().lower()
-    return word in STOP_WORDS and " " not in body.strip()
+    return body.strip().lower() in STOP_WORDS
 
 
 def should_respond(body, trigger, bot_names, parent_id="", our_message_ids=None):
@@ -74,6 +80,36 @@ def should_respond(body, trigger, bot_names, parent_id="", our_message_ids=None)
         return False
 
     return False
+
+
+class BoundedSet:
+    """A set that evicts the oldest entries when it exceeds max_size.
+
+    Used for tracking bot message IDs — prevents unbounded memory growth
+    in long-running sessions.
+    """
+
+    def __init__(self, max_size=MAX_OUR_MESSAGE_IDS):
+        self._max_size = max_size
+        self._order = OrderedDict()
+
+    def add(self, item):
+        """Add an item. If already present, move to end (most recent)."""
+        if item in self._order:
+            self._order.move_to_end(item)
+        else:
+            self._order[item] = None
+            if len(self._order) > self._max_size:
+                self._order.popitem(last=False)  # evict oldest
+
+    def __contains__(self, item):
+        return item in self._order
+
+    def __len__(self):
+        return len(self._order)
+
+    def __repr__(self):
+        return f"BoundedSet({list(self._order.keys())})"
 
 
 def session_path(conv_id, session_dir):

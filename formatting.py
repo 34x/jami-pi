@@ -3,8 +3,13 @@
 from config import ACK_PREFIX
 
 
-def format_sender(uri, known_senders):
-    """Return a short name for a sender URI. Track names in known_senders dict."""
+def get_sender_name(uri, known_senders):
+    """Return a short name for a sender URI.
+
+    If the URI is already known, return the stored name.
+    Otherwise, derive a short name from the URI, store it, and return it.
+    Side effect: unknown senders are added to known_senders.
+    """
     if uri in known_senders:
         return known_senders[uri]
     # Use last 8 chars as short ID
@@ -32,7 +37,7 @@ def format_conversation_for_pi(messages, our_uri, known_senders):
         if body.startswith(ACK_PREFIX):
             continue
 
-        sender = format_sender(sender_uri, known_senders)
+        sender = get_sender_name(sender_uri, known_senders)
         lines.append(f"[{sender}]: {body}")
 
     return "\n".join(lines)
@@ -44,7 +49,7 @@ def build_prompt(
     """Build the prompt to send to pi."""
     sender_uri = new_message.get("from", "")
     body = new_message.get("body", "").strip()
-    sender = format_sender(sender_uri, known_senders)
+    sender = get_sender_name(sender_uri, known_senders)
 
     context_lines = []
     if member_count == 2:

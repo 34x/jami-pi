@@ -132,6 +132,9 @@ Built with [pi.dev](https://pi.dev) and **GLM-5.1**.
 # Start the bot (auto-detects account and conversation)
 python3 bot.py
 
+# Show version
+python3 bot.py --version
+
 # Or specify account explicitly
 python3 bot.py --account <account-id>
 
@@ -149,6 +152,9 @@ python3 bot.py --no-ack
 
 # Custom history context (default: 20 messages)
 python3 bot.py --history 50
+
+# Set pi timeout (default: 300 seconds, 0 = no timeout)
+python3 bot.py --timeout 600
 
 # Group chat: only respond when mentioned or replied to
 python3 bot.py --trigger mention
@@ -272,6 +278,7 @@ the prompt so pi can adjust its behavior.
 | `--greeting TEXT` | `online` | Startup greeting: `online` sends "🟢 I'm online!", custom text, or `false` to disable |
 | `--trigger MODE` | `all` | When to respond: `all`, `mention`, or `smart` |
 | `--pi-args ARGS` | (none) | Extra arguments passed to pi CLI |
+| `--timeout N` | `300` | pi call timeout in seconds (0 = no timeout) |
 | `--dry-run` | off | Log messages without calling pi |
 
 ## Protocol Details

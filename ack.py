@@ -1,8 +1,7 @@
 """Ack/status message management — build and edit bot status messages in Jami."""
 
+import contextlib
 import time
-
-from config import ACK_PREFIX
 
 
 class AckManager:
@@ -11,6 +10,10 @@ class AckManager:
     Accumulates all metadata (model, tokens, tools) cumulatively —
     once a field is known it is never dropped. The ack message always
     reflects the full known state.
+
+    Progress updates arriving before the ack message ID is captured
+    are queued and flushed once the ID becomes available, so early
+    progress (model, first tools) is no longer silently dropped.
     """
 
     def __init__(self, sdk, account_id, conv_id, our_uri, no_ack=False):
@@ -21,6 +24,7 @@ class AckManager:
         self.no_ack = no_ack
         self.ack_msg_id = None
         self._last_edit_time = 0
+        self._pending_edits = []  # queued progress calls before ack_msg_id is known
 
         # Cumulative state — only grows, never shrinks
         self.status = ""
@@ -64,11 +68,14 @@ class AckManager:
         except Exception as e:
             print(f"[bot] ⚠️  Ack failed: {e}")
 
-    def on_progress(self, state):
-        """Edit ack message with streaming progress. Called by pi_client.
+    def _flush_pending(self):
+        """Flush queued progress edits now that ack_msg_id is known."""
+        for state in self._pending_edits:
+            self._apply_edit(state)
+        self._pending_edits = None  # no longer queueing
 
-        Merges new data into cumulative state, then re-sends the full message.
-        """
+    def _apply_edit(self, state):
+        """Merge state and send the editMessage call."""
         if self.no_ack or not self.ack_msg_id:
             return
 
@@ -86,13 +93,13 @@ class AckManager:
             self.tools = list(tools)  # pi_client already accumulates these
 
         # Tool events force immediate update; token updates throttled to 10s
-        force = state.pop("force_update", False)
+        force = state.get("force_update", False)
         now = time.time()
         if not force and now - self._last_edit_time < 10:
             return
         self._last_edit_time = now
 
-        try:
+        with contextlib.suppress(Exception):  # Best-effort progress update
             self.sdk.call(
                 "editMessage",
                 {
@@ -102,8 +109,24 @@ class AckManager:
                     "messageId": self.ack_msg_id,
                 },
             )
-        except Exception:
-            pass  # Best-effort progress update
+
+    def on_progress(self, state):
+        """Edit ack message with streaming progress. Called by pi_client.
+
+        Merges new data into cumulative state, then re-sends the full message.
+        If the ack message ID hasn't been captured yet, queues the update
+        and flushes it later once the ID arrives.
+        """
+        if self.no_ack:
+            return
+
+        # If ack_msg_id is not yet known, queue the state for later flush
+        if self.ack_msg_id is None:
+            if self._pending_edits is not None:
+                self._pending_edits.append(state)
+            return
+
+        self._apply_edit(state)
 
     def mark_cancelled(self):
         """Edit ack message to show status: cancelled (with all accumulated info)."""
@@ -112,7 +135,7 @@ class AckManager:
 
         self.status = "cancelled"
 
-        try:
+        with contextlib.suppress(Exception):
             self.sdk.call(
                 "editMessage",
                 {
@@ -122,8 +145,6 @@ class AckManager:
                     "messageId": self.ack_msg_id,
                 },
             )
-        except Exception:
-            pass
 
     def mark_done(self):
         """Edit ack message to show status: done (with all accumulated info)."""
@@ -132,7 +153,7 @@ class AckManager:
 
         self.status = "done"
 
-        try:
+        with contextlib.suppress(Exception):
             self.sdk.call(
                 "editMessage",
                 {
@@ -142,5 +163,3 @@ class AckManager:
                     "messageId": self.ack_msg_id,
                 },
             )
-        except Exception:
-            pass

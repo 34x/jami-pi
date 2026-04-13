@@ -1,5 +1,6 @@
 """Jami bridge stdio client — JSON-RPC 2.0 over stdin/stdout."""
 
+import contextlib
 import json
 import queue
 import subprocess
@@ -75,19 +76,24 @@ class JamiStdioClient:
     def stop(self):
         """Shut down the SDK subprocess gracefully."""
         if self.proc:
-            try:
+            with contextlib.suppress(Exception):
                 self.call("shutdown", timeout=2)
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 self.proc.terminate()
-            except Exception:
-                pass
+            with contextlib.suppress(Exception):
+                self.proc.wait(timeout=5)
             self.proc = None
 
     def is_alive(self):
         """Check if the SDK subprocess is still running."""
         return self.proc is not None and self.proc.poll() is None
+
+    @property
+    def process_returncode(self):
+        """Return the subprocess exit code, or None if still running."""
+        if self.proc is None:
+            return None
+        return self.proc.poll()
 
     def call(self, method, params=None, id=None, timeout=10.0):
         """Send a JSON-RPC request and wait for the response.

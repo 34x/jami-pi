@@ -11,6 +11,7 @@ See: python3 bot.py --help
 """
 
 import argparse
+import contextlib
 import os
 import queue
 import shlex
@@ -24,10 +25,12 @@ from config import (
     ACK_PREFIX,
     CANCELLED_MARKER,
     DEFAULT_HISTORY,
+    DEFAULT_PI_TIMEOUT,
     DEFAULT_SESSION_DIR,
     SILENT_MARKER,
     TRIGGER_ALL,
     TRIGGER_MODES,
+    BoundedSet,
     is_new_session,
     is_stop_command,
     session_path,
@@ -36,7 +39,6 @@ from config import (
 from formatting import build_prompt
 from jami_client import JamiStdioClient
 from pi_client import call_pi
-
 
 # ── Logging helpers ──────────────────────────────────────────────────────
 # Module-level flags set once from args.
@@ -75,7 +77,7 @@ class Conversation:
     def __init__(self, conv_id, member_count=0):
         self.conv_id = conv_id
         self.member_count = member_count
-        self.our_message_ids = set()  # bot's own message IDs (for reply detection)
+        self.our_message_ids = BoundedSet()  # bot's own message IDs (for reply detection, bounded)
         self.busy = False  # True while pi is processing a request
         self.cancel = None  # threading.Event to cancel current pi call
         self.sender_uri = None  # who we're currently processing
@@ -86,6 +88,9 @@ class Conversation:
 def main():
     parser = argparse.ArgumentParser(description="jami-pi: Jami <-> pi chat bridge")
     parser.add_argument(
+        "--version", action="version", version="jami-pi 0.1.0"
+    )
+    parser.add_argument(
         "--jami",
         default=None,
         help="Path to jami-bridge binary (or set JAMI_BRIDGE_PATH env)",
@@ -93,8 +98,8 @@ def main():
     parser.add_argument(
         "--account",
         default=None,
-        help="Account spec: hex ID, jami://URI, archive:///path.gz, /path.gz (create+export), or new. "
-        "Default: serve all accounts (auto-detect).",
+        help="Account spec: hex ID, jami://URI, archive:///path.gz, /path.gz "
+        "(create+export), or new. Default: serve all accounts (auto-detect).",
     )
     parser.add_argument(
         "--list-accounts", action="store_true", help="List accounts and exit"
@@ -149,7 +154,14 @@ def main():
         "--trigger",
         default=TRIGGER_ALL,
         choices=sorted(TRIGGER_MODES),
-        help="When to respond: all (every msg), mention (bot name/reply), smart (mention+LLM check)",
+        help="When to respond: all (every msg), mention (bot name/reply), "
+        "smart (mention+LLM check)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_PI_TIMEOUT,
+        help=f"pi call timeout in seconds (default: {DEFAULT_PI_TIMEOUT}, 0 = no timeout)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Don't call pi")
     parser.add_argument(
@@ -170,7 +182,8 @@ def main():
     # Resolve jami-bridge binary path: --jami flag > JAMI_BRIDGE_PATH env > PATH lookup
     jami_binary = args.jami or os.environ.get("JAMI_BRIDGE_PATH") or "jami-bridge"
 
-    pi_extra = shlex.split(args.pi_args) if args.pi_args else None
+    pi_extra = shlex.split(args.pi_args) if args.pi_args else []
+    pi_timeout = args.timeout if args.timeout > 0 else 0  # 0 = no timeout
     use_sessions = not args.no_session
     os.makedirs(args.session_dir, exist_ok=True)
 
@@ -199,7 +212,7 @@ def main():
     sdk.start()
 
     # ── Log startup configuration ──────────────────────────────────────
-    effective_bridge_args = ["--stdio"] + bridge_args
+    effective_bridge_args = ["--stdio", *bridge_args]
     bot_log("[bot] ━━ Startup Config ━━")
     bot_log(f"[bot]   Bridge binary:  {jami_binary}")
     bot_log(f"[bot]   Bridge args:    {effective_bridge_args}")
@@ -319,7 +332,8 @@ def main():
     trigger = args.trigger
     for aid in accounts:
         bot_log(
-            f"[bot] Account: {aid} (uri: {account_identities[aid]['uri']}, alias: {account_identities[aid]['alias']})"
+            f"[bot] Account: {aid} "
+            f"(uri: {account_identities[aid]['uri']}, alias: {account_identities[aid]['alias']})"
         )
     bot_log(f"[bot] Trigger: {trigger} (names: {bot_names})")
 
@@ -377,7 +391,8 @@ def main():
             bot_log("[bot] No conversations yet — waiting for auto-accepted invite...")
         else:
             print(
-                "No conversations found. Create one first, or use --bridge-args '--auto-accept' to auto-accept invites."
+                "No conversations found. Create one first, or use "
+                "--bridge-args '--auto-accept' to auto-accept invites."
             )
             sys.exit(1)
     else:
@@ -489,6 +504,7 @@ def main():
                 extra_args=pi_extra,
                 on_progress=_on_progress,
                 cancel=conv.cancel,
+                timeout=pi_timeout,
             )
             # Put result for the main loop to pick up
             pi_results.put((conv.conv_id, pi_result_box[0], ack, partial_text_box[0]))
@@ -538,33 +554,63 @@ def main():
         while True:
             # ── Drain pi results first ──────────────────────────────────
             while not pi_results.empty():
-                conv_id, reply, ack, _ = pi_results.get_nowait()
-                conv = conversations.get(conv_id)
-                if not conv:
-                    continue
-                if reply == CANCELLED_MARKER:
-                    # Already handled when cancel.set() was called —
-                    # conversation was freed immediately. Just discard.
-                    continue
-                if reply is None:
-                    bot_warn(
-                        f"[bot] ⚠️  pi thread returned no result for {_short_id(conv_id)}"
-                    )
-                    ack.mark_done()
-                    conv.ack = None
-                    conv.busy = False
-                    conv.cancel = None
-                    conv.sender_uri = None
-                    continue
-                _send_reply(conv_id, reply, ack)
+                try:
+                    conv_id, reply, ack, _ = pi_results.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    conv = conversations.get(conv_id)
+                    if not conv:
+                        continue
+                    if reply == CANCELLED_MARKER:
+                        # Already handled when cancel.set() was called —
+                        # conversation was freed immediately. Just discard.
+                        continue
+                    if reply is None:
+                        bot_warn(
+                            f"[bot] ⚠️  pi thread returned no result for {_short_id(conv_id)}"
+                        )
+                        ack.mark_done()
+                        conv.ack = None
+                        conv.busy = False
+                        conv.cancel = None
+                        conv.sender_uri = None
+                        continue
+                    _send_reply(conv_id, reply, ack)
+                except Exception as e:
+                    bot_warn(f"[bot] ⚠️  Error processing pi result: {e}")
 
             # ── Get next event ───────────────────────────────────────────
+            # Detect bridge crash: if the subprocess died, we'll never get
+            # more events. Exit with a clear error instead of spinning forever.
+            if not sdk.is_alive():
+                rc = sdk.process_returncode
+                bot_warn(f"[bot] ❌ jami-bridge process exited (code {rc})")
+                break
+
             event = sdk.get_notification(timeout=0.5)
             if not event:
                 continue
 
             method = event.get("method", "")
             params = event.get("params", {})
+
+            # ── Log registration changes (account online/offline) ────────
+            if method == "onRegistrationChanged":
+                evt_account = params.get("accountId", "?")
+                evt_state = params.get("state", "?")
+                evt_detail = params.get("detail", "")
+                bot_log(
+                    f"[bot] 📡 Account {evt_account[:8]}... registration: {evt_state}"
+                    + (f" ({evt_detail})" if evt_detail else "")
+                )
+                continue
+
+            # ── Log conversation requests (invites) ──────────────────────
+            if method == "onConversationRequestReceived":
+                req_conv_id = params.get("conversationId", "?")
+                bot_log(f"[bot] 📨 Conversation invite received: {_short_id(req_conv_id)}...")
+                continue  # bridge handles accept/decline via policy flags
 
             # ── Filter events by account (defense-in-depth) ────────────
             # When serving a specific account (--account), ignore events
@@ -588,7 +634,8 @@ def main():
                 if ready_conv_id not in conversations:
                     conv = _register_conversation(ready_conv_id)
                     bot_log(
-                        f"[bot] 📨 New conversation ready: {_short_id(ready_conv_id)}... ({conv.member_count} members)"
+                        f"[bot] 📨 New conversation ready: "
+                        f"{_short_id(ready_conv_id)}... ({conv.member_count} members)",
                     )
                 # Send greeting (once per conversation, when it's actually ready)
                 if greeting_text and not conversations[ready_conv_id].greeted:
@@ -620,15 +667,18 @@ def main():
                             known_senders[member_uri] = member_uri[-8:]
                         action = "joined" if evt_type == 1 else "added"
                         bot_log(
-                            f"[bot] 👤 {known_senders[member_uri]} {action} in {_short_id(evt_conv_id)}"
+                            f"[bot] 👤 {known_senders[member_uri]} "
+                            f"{action} in {_short_id(evt_conv_id)}",
                         )
                     elif evt_type == 2:
                         bot_log(
-                            f"[bot] 👤 {known_senders.get(member_uri, member_uri[-8:])} left {_short_id(evt_conv_id)}"
+                            f"[bot] 👤 {known_senders.get(member_uri, member_uri[-8:])} "
+                            f"left {_short_id(evt_conv_id)}"
                         )
                     elif evt_type == 3:
                         bot_log(
-                            f"[bot] 👤 {known_senders.get(member_uri, member_uri[-8:])} banned from {_short_id(evt_conv_id)}"
+                            f"[bot] 👤 {known_senders.get(member_uri, member_uri[-8:])} "
+                            f"banned from {_short_id(evt_conv_id)}"
                         )
                 continue
 
@@ -659,6 +709,7 @@ def main():
                         and conv.ack.ack_msg_id is None
                     ):
                         conv.ack.ack_msg_id = msg_id
+                        conv.ack._flush_pending()
                         bot_verbose(f"[bot] 📌 Captured ack ID: {msg_id}")
                 continue
 
@@ -673,7 +724,8 @@ def main():
                 # (e.g. 1:1 convs created while bot was running)
                 conv = _register_conversation(conv_id_event)
                 bot_log(
-                    f"[bot] 📩 New conversation discovered: {_short_id(conv_id_event)}... ({conv.member_count} members)"
+                    f"[bot] 📩 New conversation discovered: "
+                    f"{_short_id(conv_id_event)}... ({conv.member_count} members)"
                 )
 
             # ── Handle busy conversation ──────────────────────────────
@@ -696,7 +748,7 @@ def main():
                     conv.sender_uri = None
                     conv.cancel = None
                     # Confirm cancellation to the user
-                    try:
+                    with contextlib.suppress(Exception):
                         sdk.call(
                             "sendMessage",
                             {
@@ -705,15 +757,13 @@ def main():
                                 "body": "🛑 Stopped.",
                             },
                         )
-                    except Exception:
-                        pass
                     continue
 
                 # Other messages while busy: ask sender to retry later
                 bot_log(
                     f"[bot] ⏳ Busy in {_short_id(conv_id_event)} — message rejected"
                 )
-                try:
+                with contextlib.suppress(Exception):
                     sdk.call(
                         "sendMessage",
                         {
@@ -725,8 +775,6 @@ def main():
                             ),
                         },
                     )
-                except Exception:
-                    pass
                 continue
 
             # ── Trigger gate ──────────────────────────────────────────
@@ -737,7 +785,8 @@ def main():
             # relevance check could be added here in the future.
             if not decision:
                 bot_verbose(
-                    f"[bot] 🔄 Skipping (trigger={trigger}, no mention/reply) in {_short_id(conv_id_event)}"
+                    f"[bot] 🔄 Skipping (trigger={trigger}, "
+                    f"no mention/reply) in {_short_id(conv_id_event)}"
                 )
                 continue
 
@@ -752,6 +801,7 @@ def main():
 
     except KeyboardInterrupt:
         bot_log("\n[bot] Stopping...")
+    finally:
         # Cancel any running pi calls
         for conv in conversations.values():
             if conv.busy and conv.cancel:

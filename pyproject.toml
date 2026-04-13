@@ -5,6 +5,47 @@ description = "Jami <-> pi coding agent chat bridge"
 readme = "README.md"
 license = {text = "GPL-3.0-or-later"}
 requires-python = ">=3.9"
+keywords = ["jami", "pi", "chat", "bridge", "bot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Communications :: Chat",
+]
+
+[project.scripts]
+jami-pi = "bot:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
 
 [tool.ruff]
 src = ["."]
+line-length = 99
+target-version = "py39"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "RUF",  # Ruff-specific
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "formatting", "ack", "jami_client", "pi_client"]

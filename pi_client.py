@@ -8,6 +8,9 @@ import time
 
 from config import CANCELLED_MARKER
 
+# Prefix for bot-generated error messages (distinct from LLM output)
+_ERROR_PREFIX = "[jami-pi: "
+
 
 def _tool_label(name, args):
     """Build a readable label for a tool call: 'read bot.py', 'edit foo.sh', etc."""
@@ -49,6 +52,7 @@ def call_pi(
                  Set state["force_update"] = True to bypass throttle.
     cancel: optional threading.Event — set it to terminate pi immediately.
             Returns CANCELLED_MARKER if cancelled.
+    timeout: max seconds to wait for pi (default 300). 0 or negative = no timeout.
     """
     cmd = ["pi", "--print", "--mode", "json"]
 
@@ -65,7 +69,7 @@ def call_pi(
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
-        return "[pi not found — is it installed?]"
+        return f"{_ERROR_PREFIX}pi not found — is it installed?]"
 
     # Reader thread: reads lines from pi stdout and puts them in a queue.
     # This is portable (no fcntl) and works on Linux, macOS, and Windows.
@@ -150,7 +154,6 @@ def call_pi(
         # Report progress every ~50 tokens
         if on_progress and token_count > 0 and token_count - last_progress >= 50:
             state["tokens"] = token_count
-            state.pop("force_update", None)
             on_progress(state)
             last_progress = token_count
 
@@ -177,13 +180,12 @@ def call_pi(
             proc.wait(timeout=5)
             return CANCELLED_MARKER
 
-        # Check for timeout (default: 5 minutes)
-        elapsed = time.time() - start_time
-        if elapsed > timeout:
+        # Check for timeout
+        if timeout > 0 and time.time() - start_time > timeout:
             proc.terminate()
             reader_thread.join(timeout=5)
             proc.wait(timeout=5)
-            return f"[pi timed out after {int(timeout)}s]"
+            return f"{_ERROR_PREFIX}pi timed out after {int(timeout)}s]"
 
         try:
             line = line_queue.get(timeout=0.2)
@@ -203,12 +205,11 @@ def call_pi(
     reader_thread.join(timeout=5)
     proc.wait()
     if proc.returncode != 0 and not reply:
-        return f"[pi exited with code {proc.returncode}]"
+        return f"{_ERROR_PREFIX}pi exited with code {proc.returncode}]"
 
     # Final progress report
     if on_progress and (not cancel or not cancel.is_set()):
         state["tokens"] = token_count
-        state.pop("force_update", None)
         on_progress(state)
 
-    return reply or "[pi returned no text response]"
+    return reply or f"{_ERROR_PREFIX}pi returned no text response]"
